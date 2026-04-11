@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            color: #1a1a2e;
+            font-size: 14px;
+            line-height: 1.5;
+            padding: 40px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 40px;
+            border-bottom: 3px solid #6c5ce7;
+            padding-bottom: 20px;
+        }
+        .hotel-info h1 {
+            font-size: 24px;
+            color: #6c5ce7;
+            margin-bottom: 5px;
+        }
+        .hotel-info p {
+            color: #666;
+            font-size: 12px;
+        }
+        .invoice-meta {
+            text-align: right;
+        }
+        .invoice-meta h2 {
+            font-size: 28px;
+            color: #6c5ce7;
+            margin-bottom: 10px;
+        }
+        .invoice-meta p {
+            font-size: 12px;
+            color: #666;
+        }
+        .parties {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+        }
+        .party {
+            width: 45%;
+        }
+        .party h3 {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #999;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        .party p {
+            font-size: 13px;
+        }
+        .stay-info {
+            background: #f8f9fa;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            display: flex;
+            gap: 40px;
+        }
+        .stay-info .item {
+            text-align: center;
+        }
+        .stay-info .label {
+            font-size: 11px;
+            color: #999;
+            text-transform: uppercase;
+        }
+        .stay-info .value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1a1a2e;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 25px;
+        }
+        thead th {
+            background: #6c5ce7;
+            color: white;
+            padding: 10px 15px;
+            text-align: left;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        thead th:last-child { text-align: right; }
+        tbody td {
+            padding: 10px 15px;
+            border-bottom: 1px solid #eee;
+        }
+        tbody td:last-child { text-align: right; }
+        tbody tr:hover { background: #f8f9fa; }
+        .totals {
+            float: right;
+            width: 300px;
+        }
+        .totals .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .totals .row.total {
+            border-top: 2px solid #6c5ce7;
+            border-bottom: none;
+            font-size: 18px;
+            font-weight: 700;
+            color: #6c5ce7;
+            padding-top: 12px;
+        }
+        .footer {
+            clear: both;
+            margin-top: 60px;
+            text-align: center;
+            color: #999;
+            font-size: 11px;
+            border-top: 1px solid #eee;
+            padding-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="hotel-info">
+            <h1>{{ hotel_name }}</h1>
+            <p>CIF/NIF: {{ hotel_tax_id }}</p>
+            <p>{{ hotel_address }}</p>
+        </div>
+        <div class="invoice-meta">
+            <h2>FACTURA</h2>
+            <p><strong>N&ordm;:</strong> {{ invoice_number }}</p>
+            <p><strong>Fecha:</strong> {{ issue_date }}</p>
+        </div>
+    </div>
+
+    <div class="parties">
+        <div class="party">
+            <h3>Cliente</h3>
+            <p><strong>{{ guest_name }}</strong></p>
+            <p>NIF/Pasaporte: {{ guest_tax_id }}</p>
+        </div>
+    </div>
+
+    <div class="stay-info">
+        <div class="item">
+            <div class="label">Check-in</div>
+            <div class="value">{{ checkin_date }}</div>
+        </div>
+        <div class="item">
+            <div class="label">Check-out</div>
+            <div class="value">{{ checkout_date }}</div>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Descripci&oacute;n</th>
+                <th>Noches</th>
+                <th>Precio/Noche</th>
+                <th>Importe</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in line_items %}
+            <tr>
+                <td>{{ item.description }}</td>
+                <td>{{ item.quantity }}</td>
+                <td>{{ item.unit_price }} {{ currency }}</td>
+                <td>{{ item.amount }} {{ currency }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="totals">
+        <div class="row">
+            <span>Subtotal</span>
+            <span>{{ subtotal }} {{ currency }}</span>
+        </div>
+        <div class="row">
+            <span>IVA ({{ tax_rate }}%)</span>
+            <span>{{ tax_amount }} {{ currency }}</span>
+        </div>
+        <div class="row total">
+            <span>TOTAL</span>
+            <span>{{ total }} {{ currency }}</span>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>Generado autom&aacute;ticamente por Billi &mdash; Sistema de facturaci&oacute;n inteligente para hoteles</p>
+    </div>
+</body>
+</html>
