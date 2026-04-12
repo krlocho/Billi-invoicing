@@ -1,7 +1,14 @@
-"""Core reconciliation engine — LLM-first approach.
+"""Core reconciliation engine — LLM-first with RAG augmentation.
 
-The LLM is the primary brain for matching bank transactions to channel reservations.
-Algorithmic validation (subset-sum, fuzzy matching) acts as a verification layer.
+Architecture:
+- RAG retrieves similar past reconciliations from ChromaDB
+- Haiku 4.5 handles routine matching (fast, cheap, ~85% of cases)
+- Sonnet 4.6 escalates for ambiguous cases (confidence < 0.7)
+- Algorithmic validation layer verifies LLM decisions
+- Token-optimized: compact CSV format, pre-filtered RAG context
+
+Commission rates, taxes, and bank formats are VARIABLE per tenant —
+passed as context, never hardcoded in prompts.
 """
 
 import json
@@ -13,6 +20,12 @@ from src.matching.commission import amount_matches, calculate_expected_net_for_g
 from src.matching.fuzzy_names import name_similarity
 
 logger = logging.getLogger(__name__)
+
+# LLM model tiers — Haiku for routine, Sonnet for ambiguous
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
+SONNET_MODEL = "claude-sonnet-4-6-20250514"
+OPENAI_FAST = "gpt-4o-mini"
+AMBIGUITY_THRESHOLD = 0.70  # Below this, escalate to stronger model
 
 
 @dataclass
@@ -42,138 +55,190 @@ class MatchResult:
     confidence_score: float
     confidence_tier: str  # HIGH, MEDIUM, LOW
     amount_difference: float
-    match_type: str  # llm, hybrid, algorithmic
+    match_type: str  # llm_haiku, llm_sonnet, hybrid
     reasoning: str
     details: dict = field(default_factory=dict)
 
 
-LLM_MATCHING_PROMPT = """Eres un experto en conciliación bancaria hotelera. Tu tarea es emparejar
-transacciones bancarias con reservas de canales (Booking.com, Expedia, etc.).
+# Compact system prompt — optimized for minimal tokens
+SYSTEM_PROMPT = """You are a hotel bank reconciliation expert. Match bank transactions to channel reservations.
 
-## Reglas clave:
-1. Un pago bancario de un canal puede corresponder a MÚLTIPLES reservas (pago agrupado)
-2. El importe del pago = suma de importes de reservas MENOS la comisión del canal
-3. Comisiones típicas: Booking.com ~15-18%, Expedia ~15-25%, Hotelbeds ~20%
-4. Los nombres pueden no coincidir: "Jose" en la reserva puede ser "Francisco" en el banco
-5. Los channels suelen pagar 1-15 días después del checkout
-6. La descripción bancaria puede incluir el nombre del canal (ej: "BOOKING.COM BV")
+Rules:
+1. One bank payment can cover MULTIPLE reservations (grouped payout)
+2. Payment = sum(reservation_amounts) - channel_commission
+3. Names may differ between bank and reservation
+4. Channels pay 1-15 days after checkout
 
-## Datos del feedback histórico (ejemplos de matches confirmados):
-{feedback_examples}
+{tenant_context}
 
-## Transacciones bancarias a conciliar:
-{transactions_json}
+Respond ONLY with valid JSON:
+{{"matches":[{{"tx_id":"...","res_ids":["..."],"confidence":0.92,"reasoning":"...","channel":"booking","commission_rate":0.22}}],"unmatched_tx":["..."],"unmatched_res":["..."]}}"""
 
-## Reservas disponibles (no conciliadas):
-{reservations_json}
+# Compact data format — ~40% fewer tokens than JSON
+DATA_TEMPLATE = """{rag_context}
 
-## Instrucciones:
-Analiza cada transacción bancaria e intenta emparejarla con una o más reservas.
-Para cada match, explica tu razonamiento.
+## Bank transactions to reconcile:
+{transactions_compact}
 
-Responde SOLO con JSON válido:
-{{
-    "matches": [
-        {{
-            "bank_transaction_id": "uuid",
-            "reservation_ids": ["uuid1", "uuid2"],
-            "confidence": 0.92,
-            "reasoning": "Explicación detallada del match",
-            "detected_channel": "booking.com",
-            "estimated_commission_rate": 0.15
-        }}
-    ],
-    "unmatched_transactions": ["uuid1"],
-    "unmatched_reservations": ["uuid1", "uuid2"],
-    "analysis_notes": "Observaciones generales sobre los datos"
-}}"""
+## Available reservations (unreconciled):
+{reservations_compact}"""
 
 
 def run_matching(
     transactions: list[TransactionData],
     reservations: list[ReservationData],
     feedback_examples: list[dict] | None = None,
+    tenant_context: str = "",
 ) -> list[MatchResult]:
-    """Run LLM-first matching with algorithmic validation."""
-
+    """Run LLM-first matching with RAG augmentation and tiered models."""
     if not transactions or not reservations:
         return []
 
-    # Step 1: LLM matching
-    llm_matches = _llm_match(transactions, reservations, feedback_examples or [])
+    # Step 1: Detect channels from bank descriptions
+    detected_channels = [_detect_channel(tx.description) for tx in transactions]
 
-    # Step 2: Algorithmic validation of LLM results
-    validated_matches = []
+    # Step 2: Retrieve RAG context (similar past reconciliations)
+    rag_context = _get_rag_context(transactions, detected_channels)
+
+    # Step 3: LLM matching with Haiku (fast/cheap)
+    llm_matches = _llm_match(
+        transactions, reservations, detected_channels,
+        rag_context, tenant_context, model_tier="fast",
+    )
+
+    # Step 4: Algorithmic validation
+    validated = []
+    ambiguous_txs = []
     for match in llm_matches:
-        validated = _validate_match(match, transactions, reservations)
-        validated_matches.append(validated)
+        result = _validate_match(match, transactions, reservations)
+        if result.confidence_score < AMBIGUITY_THRESHOLD:
+            ambiguous_txs.append(result)
+        else:
+            validated.append(result)
 
-    return validated_matches
+    # Step 5: Escalate ambiguous cases to Sonnet (smarter, more expensive)
+    if ambiguous_txs:
+        logger.info(f"Escalating {len(ambiguous_txs)} ambiguous matches to stronger model")
+        ambiguous_tx_ids = {m.bank_transaction_id for m in ambiguous_txs}
+        ambiguous_transactions = [t for t in transactions if t.id in ambiguous_tx_ids]
+        if ambiguous_transactions:
+            retry_matches = _llm_match(
+                ambiguous_transactions, reservations,
+                [_detect_channel(t.description) for t in ambiguous_transactions],
+                rag_context, tenant_context, model_tier="smart",
+            )
+            for match in retry_matches:
+                result = _validate_match(match, transactions, reservations)
+                result.match_type = "hybrid_escalated"
+                validated.append(result)
+
+    return validated
+
+
+def _detect_channel(description: str) -> str | None:
+    """Detect channel from bank description."""
+    desc_lower = description.lower()
+    if "booking.com" in desc_lower or "booking" in desc_lower:
+        return "booking"
+    elif "airbnb" in desc_lower:
+        return "airbnb"
+    elif "stripe" in desc_lower:
+        return "stripe"
+    elif "travelscape" in desc_lower or "expedia" in desc_lower:
+        return "expedia"
+    elif "sunweb" in desc_lower:
+        return "sunweb"
+    return None
+
+
+def _get_rag_context(
+    transactions: list[TransactionData],
+    detected_channels: list[str | None],
+) -> str:
+    """Retrieve RAG context, with graceful fallback if ChromaDB unavailable."""
+    try:
+        from src.rag.vector_store import build_rag_context
+        tx_dicts = [{"description": t.description, "amount": t.amount} for t in transactions]
+        return build_rag_context(tx_dicts, detected_channels, max_examples_per_tx=3)
+    except Exception as e:
+        logger.warning(f"RAG retrieval failed, proceeding without: {e}")
+        return "No previous reconciliation examples available."
+
+
+def _build_compact_transactions(transactions: list[TransactionData]) -> str:
+    """Build compact CSV-like representation of transactions (~40% fewer tokens)."""
+    lines = ["id|date|amount|description"]
+    for tx in transactions:
+        lines.append(f"{tx.id[:8]}|{tx.date}|{tx.amount}|{tx.description[:80]}")
+    return "\n".join(lines)
+
+
+def _build_compact_reservations(reservations: list[ReservationData]) -> str:
+    """Build compact CSV-like representation of reservations."""
+    lines = ["id|res_id|guest|checkin|checkout|gross|net|channel"]
+    for r in reservations:
+        lines.append(
+            f"{r.id[:8]}|{r.reservation_id or '?'}|{r.guest_name or '?'}"
+            f"|{r.checkin_date or '?'}|{r.checkout_date or '?'}"
+            f"|{r.gross_amount or 0}|{r.net_amount or 0}|{r.channel_code or '?'}"
+        )
+    return "\n".join(lines)
 
 
 def _llm_match(
     transactions: list[TransactionData],
     reservations: list[ReservationData],
-    feedback_examples: list[dict],
+    detected_channels: list[str | None],
+    rag_context: str,
+    tenant_context: str,
+    model_tier: str = "fast",
 ) -> list[MatchResult]:
-    """Use LLM as the primary matching engine."""
+    """Call LLM for matching. Tier controls model selection."""
 
-    tx_data = [
-        {"id": t.id, "date": t.date, "description": t.description, "amount": t.amount}
-        for t in transactions
-    ]
-
-    res_data = [
-        {
-            "id": r.id,
-            "reservation_id": r.reservation_id,
-            "guest_name": r.guest_name,
-            "checkin": r.checkin_date,
-            "checkout": r.checkout_date,
-            "gross_amount": r.gross_amount,
-            "net_amount": r.net_amount,
-            "channel": r.channel_code,
-        }
-        for r in reservations
-    ]
-
-    feedback_str = "Ninguno disponible aún." if not feedback_examples else json.dumps(
-        feedback_examples[:10], ensure_ascii=False, indent=2
+    system = SYSTEM_PROMPT.format(
+        tenant_context=tenant_context or "No specific tenant context provided.",
     )
-
-    prompt = LLM_MATCHING_PROMPT.format(
-        feedback_examples=feedback_str,
-        transactions_json=json.dumps(tx_data, ensure_ascii=False, indent=2),
-        reservations_json=json.dumps(res_data, ensure_ascii=False, indent=2),
+    user_prompt = DATA_TEMPLATE.format(
+        rag_context=rag_context,
+        transactions_compact=_build_compact_transactions(transactions),
+        reservations_compact=_build_compact_reservations(reservations),
     )
 
     try:
-        response_text = _call_llm(prompt)
-        return _parse_matching_response(response_text)
+        response_text = _call_llm(system, user_prompt, model_tier)
+        return _parse_response(response_text)
     except Exception as e:
-        logger.error(f"LLM matching failed: {e}")
+        logger.error(f"LLM matching failed ({model_tier}): {e}")
         return []
 
 
-def _call_llm(prompt: str) -> str:
-    """Call the configured LLM provider."""
+def _call_llm(system: str, prompt: str, model_tier: str = "fast") -> str:
+    """Call LLM with tiered model selection.
+
+    fast  = Haiku 4.5 (cheap, ~$0.001/call, good for routine matching)
+    smart = Sonnet 4.6 (expensive, ~$0.01/call, for ambiguous cases)
+    """
     if settings.default_llm_provider == "anthropic" and settings.anthropic_api_key:
         import anthropic
-
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        model = HAIKU_MODEL if model_tier == "fast" else SONNET_MODEL
         response = client.messages.create(
-            model=settings.default_llm_model,
-            max_tokens=8192,
+            model=model,
+            max_tokens=4096,
+            system=system,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text
     elif settings.openai_api_key:
         from openai import OpenAI
-
         client = OpenAI(api_key=settings.openai_api_key)
+        model = OPENAI_FAST  # GPT-4o-mini for both tiers (cheapest OpenAI option)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
             response_format={"type": "json_object"},
         )
         return response.choices[0].message.content
@@ -181,15 +246,18 @@ def _call_llm(prompt: str) -> str:
         raise RuntimeError("No LLM API key configured")
 
 
-def _parse_matching_response(response_text: str) -> list[MatchResult]:
-    """Parse LLM response into MatchResult objects."""
+def _parse_response(response_text: str) -> list[MatchResult]:
+    """Parse LLM JSON response into MatchResult objects."""
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError:
         start = response_text.find("{")
         end = response_text.rfind("}") + 1
         if start >= 0 and end > start:
-            data = json.loads(response_text[start:end])
+            try:
+                data = json.loads(response_text[start:end])
+            except json.JSONDecodeError:
+                return []
         else:
             return []
 
@@ -197,24 +265,20 @@ def _parse_matching_response(response_text: str) -> list[MatchResult]:
     for m in data.get("matches", []):
         confidence = float(m.get("confidence", 0))
         tier = "HIGH" if confidence >= 0.85 else "MEDIUM" if confidence >= 0.60 else "LOW"
-
-        matches.append(
-            MatchResult(
-                bank_transaction_id=m["bank_transaction_id"],
-                reservation_ids=m.get("reservation_ids", []),
-                confidence_score=confidence,
-                confidence_tier=tier,
-                amount_difference=0,  # Will be calculated in validation
-                match_type="llm",
-                reasoning=m.get("reasoning", ""),
-                details={
-                    "detected_channel": m.get("detected_channel"),
-                    "estimated_commission_rate": m.get("estimated_commission_rate"),
-                    "llm_confidence": confidence,
-                },
-            )
-        )
-
+        matches.append(MatchResult(
+            bank_transaction_id=m.get("tx_id", m.get("bank_transaction_id", "")),
+            reservation_ids=m.get("res_ids", m.get("reservation_ids", [])),
+            confidence_score=confidence,
+            confidence_tier=tier,
+            amount_difference=0,
+            match_type=f"llm",
+            reasoning=m.get("reasoning", ""),
+            details={
+                "channel": m.get("channel"),
+                "commission_rate": m.get("commission_rate"),
+                "llm_confidence": confidence,
+            },
+        ))
     return matches
 
 
@@ -223,34 +287,40 @@ def _validate_match(
     transactions: list[TransactionData],
     reservations: list[ReservationData],
 ) -> MatchResult:
-    """Validate and adjust LLM match with algorithmic checks."""
-
-    # Find the transaction
+    """Validate LLM match with algorithmic checks."""
     tx = next((t for t in transactions if t.id == match.bank_transaction_id), None)
+    if not tx:
+        # Try short ID match
+        tx = next((t for t in transactions if t.id[:8] == match.bank_transaction_id[:8]), None)
+        if tx:
+            match.bank_transaction_id = tx.id
+
     if not tx:
         match.confidence_score = 0
         match.confidence_tier = "LOW"
         return match
 
-    # Find matched reservations
-    matched_res = [r for r in reservations if r.id in match.reservation_ids]
+    matched_res = [r for r in reservations if r.id in match.reservation_ids or r.id[:8] in [rid[:8] for rid in match.reservation_ids]]
+    if matched_res:
+        # Update to full IDs
+        match.reservation_ids = [r.id for r in matched_res]
+
     if not matched_res:
-        match.confidence_score = 0
+        match.confidence_score *= 0.5
         match.confidence_tier = "LOW"
         return match
 
-    # Algorithmic validation scores
     scores = {}
 
-    # 1. Amount validation (with commission)
-    channel_code = match.details.get("detected_channel", "booking.com")
+    # 1. Amount validation
+    channel_code = match.details.get("channel") or _detect_channel(tx.description) or "booking"
     gross_amounts = [r.gross_amount or 0 for r in matched_res]
     expected_net = calculate_expected_net_for_group(gross_amounts, channel_code)
-    amount_ok, amount_diff = amount_matches(abs(tx.amount), expected_net)
-    match.amount_difference = amount_diff
+    amount_ok, amount_diff = amount_matches(abs(tx.amount), expected_net, tolerance_pct=0.05)
+    match.amount_difference = round(amount_diff, 2)
     scores["amount"] = 1.0 if amount_ok else max(0, 1 - (amount_diff / max(abs(tx.amount), 1)))
 
-    # 2. Name similarity (compare bank description vs guest names)
+    # 2. Name similarity
     name_scores = []
     for r in matched_res:
         if r.guest_name:
@@ -258,12 +328,11 @@ def _validate_match(
             name_scores.append(score)
     scores["name"] = max(name_scores) if name_scores else 0.5
 
-    # 3. Combine LLM confidence with algorithmic validation
+    # 3. Hybrid score: LLM confidence (60%) + algorithmic (40%)
     llm_conf = match.details.get("llm_confidence", match.confidence_score)
-    algo_conf = (scores["amount"] * 0.6 + scores["name"] * 0.4)
-
-    # Hybrid score: weighted combination
+    algo_conf = scores["amount"] * 0.7 + scores["name"] * 0.3
     final_score = llm_conf * 0.6 + algo_conf * 0.4
+
     match.confidence_score = round(final_score, 4)
     match.confidence_tier = (
         "HIGH" if final_score >= 0.85
@@ -271,12 +340,6 @@ def _validate_match(
         else "LOW"
     )
     match.match_type = "hybrid"
-    match.details["algorithmic_scores"] = scores
-    match.details["final_score_breakdown"] = {
-        "llm_weight": 0.6,
-        "llm_score": llm_conf,
-        "algo_weight": 0.4,
-        "algo_score": algo_conf,
-    }
+    match.details["scores"] = scores
 
     return match

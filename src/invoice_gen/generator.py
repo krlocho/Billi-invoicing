@@ -31,6 +31,7 @@ def generate_invoice_pdf(
     tax_amount: float,
     total: float,
     currency: str = "EUR",
+    tax_name: str = "IVA",  # IVA, IGIC, VAT, TVA, MwSt, etc.
     output_dir: str = "./uploads/invoices",
 ) -> str:
     """Generate a PDF invoice and return the file path."""
@@ -51,6 +52,7 @@ def generate_invoice_pdf(
         checkout_date=checkout_date.strftime("%d/%m/%Y") if checkout_date else "N/A",
         line_items=line_items,
         subtotal=f"{subtotal:,.2f}",
+        tax_name=tax_name,
         tax_rate=f"{tax_rate:.1f}",
         tax_amount=f"{tax_amount:,.2f}",
         total=f"{total:,.2f}",

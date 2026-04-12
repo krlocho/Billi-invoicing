@@ -17,3 +17,5 @@ node_modules/
 frontend/dist/
 frontend/node_modules/
 .DS_Store
+chroma_db/
+rag_data/ground_truth.json

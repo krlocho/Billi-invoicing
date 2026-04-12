@@ -81,8 +81,13 @@ def run_reconciliation(self, reconciliation_id: str, bank_upload_id: str, channe
         # Load feedback examples for few-shot learning
         feedback_examples = _load_feedback_examples(db, rec.tenant_id)
 
-        # Run matching
-        matches: list[MatchResult] = run_matching(tx_data, res_data, feedback_examples)
+        # Build tenant-specific context (variable commissions, taxes, etc.)
+        tenant_context = _build_tenant_context(db, rec.tenant_id)
+
+        # Run matching with RAG + tiered LLM
+        matches: list[MatchResult] = run_matching(
+            tx_data, res_data, feedback_examples, tenant_context
+        )
 
         # Store results
         matched_auto = 0
@@ -147,6 +152,52 @@ def run_reconciliation(self, reconciliation_id: str, bank_upload_id: str, channe
         raise self.retry(exc=e, countdown=120)
     finally:
         db.close()
+
+
+def _build_tenant_context(db, tenant_id) -> str:
+    """Build tenant-specific context for LLM — variable commissions, taxes, bank formats.
+
+    This is what makes the system work for ANY hotel, not just one.
+    Each hotel has different commission rates, tax regimes, properties, etc.
+    """
+    from src.models.channel import Channel
+    from src.models.tenant import Tenant
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    channels = db.query(Channel).filter(Channel.tenant_id == tenant_id).all()
+
+    lines = []
+    if tenant:
+        tax_info = tenant.settings.get("tax_type", "IGIC")
+        tax_rate = tenant.settings.get("tax_rate", 7.0)
+        lines.append(f"Hotel: {tenant.name}. Tax: {tax_info} {tax_rate}%.")
+        if tenant.settings.get("country"):
+            lines.append(f"Country: {tenant.settings['country']}.")
+
+    if channels:
+        lines.append("Channel commissions:")
+        for ch in channels:
+            config = ch.commission_config or {}
+            base = config.get("base_rate", "unknown")
+            psf = config.get("psf_rate", 0)
+            patterns = ch.bank_description_patterns or []
+            line = f"  {ch.name}: {float(base)*100 if isinstance(base, (int,float)) else base}%"
+            if psf:
+                line += f" + {float(psf)*100}% PSF"
+            if patterns:
+                line += f" (bank pattern: {patterns[0]})"
+            lines.append(line)
+    else:
+        # No channels configured — tell the LLM commissions are variable
+        lines.append(
+            "No channel commissions configured. "
+            "Commissions vary by channel, program and contract: "
+            "Booking.com 15-30% + optional PSF, Airbnb 3-16%, Expedia 15-25%, "
+            "Stripe 1.4-2.9% (own website). "
+            "Infer the actual rate from the difference between gross reservation amounts and bank payment."
+        )
+
+    return " ".join(lines) if lines else ""
 
 
 def _get_channel_code(db, channel_id) -> str | None:

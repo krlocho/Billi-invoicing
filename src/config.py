@@ -31,8 +31,11 @@ class Settings(BaseSettings):
     default_llm_provider: str = "anthropic"  # "anthropic" or "openai"
     default_llm_model: str = "claude-sonnet-4-20250514"
 
-    # Invoice
-    default_tax_rate: float = 10.0  # IVA for hotels in Spain
+    # Invoice — tax is configurable per tenant, NOT hardcoded
+    # IGIC 7% (Canarias), IVA 10% (Spain mainland), VAT varies (EU)
+    # This default is only used when no tenant config exists
+    default_tax_rate: float = 10.0
+    default_tax_type: str = "IVA"  # IVA, IGIC, VAT, TVA, MwSt, etc.
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

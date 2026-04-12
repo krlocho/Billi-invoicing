@@ -71,7 +71,9 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
                 last_num += 1
                 invoice_number = f"{year}/{last_num:04d}"
 
-                tax_rate = settings.default_tax_rate
+                # Tax rate from tenant settings (IGIC, IVA, VAT, etc.)
+                tenant_tax_rate = tenant.settings.get("tax_rate", settings.default_tax_rate)
+                tax_rate = float(tenant_tax_rate)
                 gross = float(reservation.gross_amount or 0)
                 subtotal = gross / (1 + tax_rate / 100)
                 tax_amount = gross - subtotal
@@ -104,6 +106,7 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
                     tax_amount=tax_amount,
                     total=gross,
                     currency=reservation.currency,
+                    tax_name=tenant.settings.get("tax_type", settings.default_tax_type),
                 )
 
                 invoice = Invoice(
