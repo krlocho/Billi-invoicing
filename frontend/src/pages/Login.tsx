@@ -16,10 +16,16 @@ export default function Login() {
     setError('');
     try {
       const res = await login(email, password);
-      localStorage.setItem('token', res.data.access_token);
-      navigate('/app');
-    } catch {
-      setError('Credenciales incorrectas');
+      const token = res.data.access_token;
+      if (!token) {
+        setError('No se recibio token del servidor');
+        return;
+      }
+      localStorage.setItem('token', token);
+      window.location.href = '/app';
+    } catch (err: any) {
+      console.error('Login error:', err);
+      setError(err?.response?.data?.detail || 'Credenciales incorrectas');
     } finally {
       setLoading(false);
     }

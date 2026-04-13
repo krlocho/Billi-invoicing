@@ -15,10 +15,16 @@ export default function Register() {
     setError('');
     try {
       const res = await register(form);
-      localStorage.setItem('token', res.data.access_token);
-      navigate('/app');
-    } catch {
-      setError('Error al registrar. El email podria estar en uso.');
+      const token = res.data.access_token;
+      if (!token) {
+        setError('No se recibio token del servidor');
+        return;
+      }
+      localStorage.setItem('token', token);
+      window.location.href = '/app';
+    } catch (err: any) {
+      console.error('Register error:', err);
+      setError(err?.response?.data?.detail || 'Error al registrar. El email podria estar en uso.');
     } finally {
       setLoading(false);
     }

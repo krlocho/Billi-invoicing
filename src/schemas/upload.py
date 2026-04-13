@@ -1,9 +1,10 @@
 from datetime import datetime
+from uuid import UUID
 from pydantic import BaseModel
 
 
 class UploadResponse(BaseModel):
-    id: str
+    id: UUID
     file_type: str
     original_filename: str | None
     status: str
@@ -14,7 +15,7 @@ class UploadResponse(BaseModel):
 
 
 class BankTransactionResponse(BaseModel):
-    id: str
+    id: UUID
     transaction_date: str
     description: str
     amount: float
@@ -25,7 +26,7 @@ class BankTransactionResponse(BaseModel):
 
 
 class ChannelReservationResponse(BaseModel):
-    id: str
+    id: UUID
     reservation_id: str | None
     guest_name: str | None
     checkin_date: str | None

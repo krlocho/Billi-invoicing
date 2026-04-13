@@ -28,8 +28,9 @@ class Settings(BaseSettings):
     # LLM
     anthropic_api_key: str = ""
     openai_api_key: str = ""
-    default_llm_provider: str = "anthropic"  # "anthropic" or "openai"
-    default_llm_model: str = "claude-sonnet-4-20250514"
+    google_api_key: str = ""
+    default_llm_provider: str = "google"  # "anthropic", "openai", or "google"
+    default_llm_model: str = "gemini-2.0-flash"
 
     # Invoice — tax is configurable per tenant, NOT hardcoded
     # IGIC 7% (Canarias), IVA 10% (Spain mainland), VAT varies (EU)
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     default_tax_rate: float = 10.0
     default_tax_type: str = "IVA"  # IVA, IGIC, VAT, TVA, MwSt, etc.
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": [".env.local", ".env"], "env_file_encoding": "utf-8"}
 
 
 settings = Settings()

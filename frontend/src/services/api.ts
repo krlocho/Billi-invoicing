@@ -16,8 +16,14 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      window.location.href = '/login';
+      // Only redirect to login if we're NOT already on the login/register page
+      // and NOT in the middle of a login/register request
+      const url = error.config?.url || '';
+      const isAuthRequest = url.includes('/auth/login') || url.includes('/auth/register');
+      if (!isAuthRequest) {
+        localStorage.removeItem('token');
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(error);
   }
@@ -29,6 +35,9 @@ export const login = (email: string, password: string) =>
 
 export const register = (data: { email: string; password: string; full_name: string; tenant_name: string }) =>
   api.post('/auth/register', data);
+
+// Channels
+export const getChannels = () => api.get('/channels/');
 
 // Uploads
 export const uploadBankStatement = (file: File) => {
@@ -44,12 +53,12 @@ export const uploadChannelFile = (file: File, channelId: string) => {
   return api.post('/uploads/channel-file', form);
 };
 
-export const getUploads = () => api.get('/uploads');
+export const getUploads = () => api.get('/uploads/');
 export const getUpload = (id: string) => api.get(`/uploads/${id}`);
 
 // Reconciliations
 export const createReconciliation = (bankUploadId: string, channelUploadIds: string[]) =>
-  api.post('/reconciliations', { bank_upload_id: bankUploadId, channel_upload_ids: channelUploadIds });
+  api.post('/reconciliations/', { bank_upload_id: bankUploadId, channel_upload_ids: channelUploadIds });
 
 export const getReconciliation = (id: string) => api.get(`/reconciliations/${id}`);
 export const getMatches = (reconciliationId: string) => api.get(`/reconciliations/${reconciliationId}/matches`);
@@ -60,8 +69,8 @@ export const confirmAllHigh = (reconciliationId: string) =>
 
 // Invoices
 export const generateInvoices = (reconciliationId: string, matchIds?: string[]) =>
-  api.post('/invoices/generate', { reconciliation_id: reconciliationId, match_ids: matchIds });
-export const getInvoices = () => api.get('/invoices');
+  api.post('/invoices/generate/', { reconciliation_id: reconciliationId, match_ids: matchIds });
+export const getInvoices = () => api.get('/invoices/');
 export const getInvoicePdf = (id: string) => `/api/v1/invoices/${id}/pdf`;
 
 export default api;

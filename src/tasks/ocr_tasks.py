@@ -11,9 +11,18 @@ from src.models.upload import Upload
 logger = logging.getLogger(__name__)
 
 
+def _process_bank_statement_sync(upload_id: str):
+    """Sync fallback when Celery is not available."""
+    _do_process_bank_statement(upload_id, celery_task=None)
+
+
 @celery.task(bind=True, max_retries=3)
 def process_bank_statement(self, upload_id: str):
     """Extract transactions from a bank statement PDF using OCR + LLM."""
+    _do_process_bank_statement(upload_id, celery_task=self)
+
+
+def _do_process_bank_statement(upload_id: str, celery_task=None):
     db = SessionLocal()
     try:
         upload = db.query(Upload).filter(Upload.id == uuid.UUID(upload_id)).first()
@@ -96,14 +105,24 @@ def process_bank_statement(self, upload_id: str):
             upload.status = "failed"
             upload.error_message = str(e)
             db.commit()
-        raise self.retry(exc=e, countdown=60)
+        if celery_task:
+            raise celery_task.retry(exc=e, countdown=60)
     finally:
         db.close()
+
+
+def _process_channel_file_sync(upload_id: str):
+    """Sync fallback when Celery is not available."""
+    _do_process_channel_file(upload_id, celery_task=None)
 
 
 @celery.task(bind=True, max_retries=3)
 def process_channel_file(self, upload_id: str):
     """Parse a channel CSV/Excel file into structured reservations."""
+    _do_process_channel_file(upload_id, celery_task=self)
+
+
+def _do_process_channel_file(upload_id: str, celery_task=None):
     db = SessionLocal()
     try:
         upload = db.query(Upload).filter(Upload.id == uuid.UUID(upload_id)).first()
@@ -175,6 +194,7 @@ def process_channel_file(self, upload_id: str):
             upload.status = "failed"
             upload.error_message = str(e)
             db.commit()
-        raise self.retry(exc=e, countdown=60)
+        if celery_task:
+            raise celery_task.retry(exc=e, countdown=60)
     finally:
         db.close()

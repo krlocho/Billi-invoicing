@@ -80,7 +80,19 @@ class GenericCSVParser(ChannelParser):
         prompt = f"Columnas disponibles: {columns}\n\nPrimeras filas:\n{sample_csv}"
 
         try:
-            if settings.default_llm_provider == "anthropic" and settings.anthropic_api_key:
+            provider = settings.default_llm_provider
+            if provider == "google" and settings.google_api_key:
+                from google import genai
+                client = genai.Client(api_key=settings.google_api_key)
+                response = client.models.generate_content(
+                    model=settings.default_llm_model,
+                    contents=f"{SYSTEM_PROMPT}\n\n{prompt}",
+                    config=genai.types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                    ),
+                )
+                text = response.text
+            elif provider == "anthropic" and settings.anthropic_api_key:
                 import anthropic
                 client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
                 response = client.messages.create(
@@ -90,7 +102,7 @@ class GenericCSVParser(ChannelParser):
                     messages=[{"role": "user", "content": prompt}],
                 )
                 text = response.content[0].text
-            elif settings.openai_api_key:
+            elif provider == "openai" and settings.openai_api_key:
                 from openai import OpenAI
                 client = OpenAI(api_key=settings.openai_api_key)
                 response = client.chat.completions.create(

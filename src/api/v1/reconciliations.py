@@ -33,13 +33,23 @@ def create_reconciliation(
     db.commit()
     db.refresh(reconciliation)
 
-    # Trigger async reconciliation
-    from src.tasks.reconciliation_tasks import run_reconciliation
-    run_reconciliation.delay(
-        str(reconciliation.id),
-        req.bank_upload_id,
-        req.channel_upload_ids,
-    )
+    # Trigger reconciliation — try async (Celery), fallback to sync
+    try:
+        from src.tasks.reconciliation_tasks import run_reconciliation
+        run_reconciliation.delay(
+            str(reconciliation.id),
+            req.bank_upload_id,
+            req.channel_upload_ids,
+        )
+    except Exception:
+        # Celery not available — run synchronously in background thread
+        import threading
+        from src.tasks.reconciliation_tasks import _run_reconciliation_sync
+        t = threading.Thread(
+            target=_run_reconciliation_sync,
+            args=(str(reconciliation.id), req.bank_upload_id, req.channel_upload_ids),
+        )
+        t.start()
 
     return reconciliation
 

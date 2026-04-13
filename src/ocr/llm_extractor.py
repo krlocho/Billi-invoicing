@@ -39,15 +39,18 @@ Responde SOLO con JSON válido, sin texto adicional. Formato:
 
 def extract_with_llm(raw_text: str) -> BankStatementResult:
     """Use LLM to structure raw OCR text into bank transactions."""
+    provider = settings.default_llm_provider
 
-    if settings.default_llm_provider == "anthropic" and settings.anthropic_api_key:
+    if provider == "google" and settings.google_api_key:
+        return _extract_google(raw_text)
+    elif provider == "anthropic" and settings.anthropic_api_key:
         return _extract_anthropic(raw_text)
-    elif settings.default_llm_provider == "openai" and settings.openai_api_key:
+    elif provider == "openai" and settings.openai_api_key:
         return _extract_openai(raw_text)
     else:
         return BankStatementResult(
             raw_text=raw_text,
-            errors=["No LLM API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY."],
+            errors=["No LLM API key configured. Set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY."],
         )
 
 
@@ -89,6 +92,22 @@ def _extract_openai(raw_text: str) -> BankStatementResult:
     )
 
     return _parse_llm_response(response.choices[0].message.content, raw_text)
+
+
+def _extract_google(raw_text: str) -> BankStatementResult:
+    from google import genai
+
+    client = genai.Client(api_key=settings.google_api_key)
+
+    response = client.models.generate_content(
+        model=settings.default_llm_model,
+        contents=f"{SYSTEM_PROMPT}\n\nExtrae todas las transacciones de este extracto bancario:\n\n{raw_text}",
+        config=genai.types.GenerateContentConfig(
+            response_mime_type="application/json",
+        ),
+    )
+
+    return _parse_llm_response(response.text, raw_text)
 
 
 def _parse_llm_response(response_text: str, raw_text: str) -> BankStatementResult:

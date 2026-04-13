@@ -95,7 +95,7 @@ export default function Reconciliation() {
         <div className="bg-white rounded-xl border border-gray-100 p-6 mb-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
-              {rec.status === 'running' ? (
+              {rec.status === 'pending' || rec.status === 'running' ? (
                 <Loader2 className="w-6 h-6 text-violet-600 animate-spin" />
               ) : rec.status === 'completed' ? (
                 <CheckCircle2 className="w-6 h-6 text-green-600" />
@@ -103,7 +103,8 @@ export default function Reconciliation() {
                 <XCircle className="w-6 h-6 text-red-600" />
               )}
               <span className="font-semibold text-gray-900">
-                {rec.status === 'running' ? 'La IA esta analizando tus datos...' :
+                {rec.status === 'pending' ? 'Preparando conciliacion...' :
+                 rec.status === 'running' ? 'La IA esta analizando tus datos...' :
                  rec.status === 'completed' ? 'Conciliacion completada' : 'Error en la conciliacion'}
               </span>
             </div>

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from src.api.deps import get_current_user
 from src.database import get_db
 from src.models.tenant import Tenant
 from src.models.user import User
@@ -45,5 +46,5 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserResponse)
-def me(user: User = Depends(__import__("src.api.deps", fromlist=["get_current_user"]).get_current_user)):
+def me(user: User = Depends(get_current_user)):
     return user

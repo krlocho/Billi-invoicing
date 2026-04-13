@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from uuid import UUID
 from pydantic import BaseModel
 
 
@@ -8,7 +9,7 @@ class InvoiceGenerateRequest(BaseModel):
 
 
 class InvoiceResponse(BaseModel):
-    id: str
+    id: UUID
     invoice_number: str
     guest_name: str | None
     issue_date: date

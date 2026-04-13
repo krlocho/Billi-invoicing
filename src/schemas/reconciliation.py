@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 from pydantic import BaseModel
 
 
@@ -8,7 +9,7 @@ class ReconciliationCreate(BaseModel):
 
 
 class ReconciliationResponse(BaseModel):
-    id: str
+    id: UUID
     status: str
     total_transactions: int | None
     matched_auto: int
@@ -22,8 +23,8 @@ class ReconciliationResponse(BaseModel):
 
 
 class MatchResponse(BaseModel):
-    id: str
-    bank_transaction_id: str
+    id: UUID
+    bank_transaction_id: UUID
     confidence_score: float | None
     confidence_tier: str | None
     amount_difference: float | None

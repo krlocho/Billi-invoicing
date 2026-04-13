@@ -13,9 +13,19 @@ from src.models.reconciliation import MatchReservation, Reconciliation, Reconcil
 logger = logging.getLogger(__name__)
 
 
+def _run_reconciliation_sync(reconciliation_id: str, bank_upload_id: str, channel_upload_ids: list[str]):
+    """Run reconciliation synchronously (fallback when Celery is not available)."""
+    _do_reconciliation(reconciliation_id, bank_upload_id, channel_upload_ids, celery_task=None)
+
+
 @celery.task(bind=True, max_retries=2)
 def run_reconciliation(self, reconciliation_id: str, bank_upload_id: str, channel_upload_ids: list[str]):
     """Run the full reconciliation pipeline."""
+    _do_reconciliation(reconciliation_id, bank_upload_id, channel_upload_ids, celery_task=self)
+
+
+def _do_reconciliation(reconciliation_id: str, bank_upload_id: str, channel_upload_ids: list[str], celery_task=None):
+    """Core reconciliation logic shared by sync and async paths."""
     db = SessionLocal()
     try:
         rec = db.query(Reconciliation).filter(
@@ -149,7 +159,8 @@ def run_reconciliation(self, reconciliation_id: str, bank_upload_id: str, channe
         if rec:
             rec.status = "failed"
             db.commit()
-        raise self.retry(exc=e, countdown=120)
+        if celery_task:
+            raise celery_task.retry(exc=e, countdown=120)
     finally:
         db.close()
 

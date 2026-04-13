@@ -36,9 +36,14 @@ async def upload_bank_statement(
     db.commit()
     db.refresh(upload)
 
-    # Trigger async OCR processing
-    from src.tasks.ocr_tasks import process_bank_statement
-    process_bank_statement.delay(str(upload.id))
+    # Trigger OCR processing — try async (Celery), fallback to sync
+    try:
+        from src.tasks.ocr_tasks import process_bank_statement
+        process_bank_statement.delay(str(upload.id))
+    except Exception:
+        import threading
+        from src.tasks.ocr_tasks import _process_bank_statement_sync
+        threading.Thread(target=_process_bank_statement_sync, args=(str(upload.id),)).start()
 
     return upload
 
@@ -68,9 +73,14 @@ async def upload_channel_file(
     db.commit()
     db.refresh(upload)
 
-    # Trigger async CSV parsing
-    from src.tasks.ocr_tasks import process_channel_file
-    process_channel_file.delay(str(upload.id))
+    # Trigger CSV parsing — try async (Celery), fallback to sync
+    try:
+        from src.tasks.ocr_tasks import process_channel_file
+        process_channel_file.delay(str(upload.id))
+    except Exception:
+        import threading
+        from src.tasks.ocr_tasks import _process_channel_file_sync
+        threading.Thread(target=_process_channel_file_sync, args=(str(upload.id),)).start()
 
     return upload
 

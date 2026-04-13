@@ -21,10 +21,12 @@ from src.matching.fuzzy_names import name_similarity
 
 logger = logging.getLogger(__name__)
 
-# LLM model tiers — Haiku for routine, Sonnet for ambiguous
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-SONNET_MODEL = "claude-sonnet-4-6-20250514"
-OPENAI_FAST = "gpt-4o-mini"
+# LLM model tiers — fast for routine, smart for ambiguous
+MODELS = {
+    "anthropic": {"fast": "claude-haiku-4-5-20251001", "smart": "claude-sonnet-4-6-20250514"},
+    "openai": {"fast": "gpt-4o-mini", "smart": "gpt-4o-mini"},
+    "google": {"fast": "gemini-2.0-flash", "smart": "gemini-2.5-pro-preview-06-05"},
+}
 AMBIGUITY_THRESHOLD = 0.70  # Below this, escalate to stronger model
 
 
@@ -215,13 +217,30 @@ def _llm_match(
 def _call_llm(system: str, prompt: str, model_tier: str = "fast") -> str:
     """Call LLM with tiered model selection.
 
-    fast  = Haiku 4.5 (cheap, ~$0.001/call, good for routine matching)
-    smart = Sonnet 4.6 (expensive, ~$0.01/call, for ambiguous cases)
+    fast  = cheap/fast model for routine matching
+    smart = stronger model for ambiguous cases
+
+    Supports: Anthropic (Claude), OpenAI (GPT), Google (Gemini)
     """
-    if settings.default_llm_provider == "anthropic" and settings.anthropic_api_key:
+    provider = settings.default_llm_provider
+
+    if provider == "google" and settings.google_api_key:
+        from google import genai
+        client = genai.Client(api_key=settings.google_api_key)
+        model = MODELS["google"][model_tier]
+        response = client.models.generate_content(
+            model=model,
+            contents=f"{system}\n\n{prompt}",
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+        return response.text
+
+    elif provider == "anthropic" and settings.anthropic_api_key:
         import anthropic
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        model = HAIKU_MODEL if model_tier == "fast" else SONNET_MODEL
+        model = MODELS["anthropic"][model_tier]
         response = client.messages.create(
             model=model,
             max_tokens=4096,
@@ -229,10 +248,11 @@ def _call_llm(system: str, prompt: str, model_tier: str = "fast") -> str:
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text
-    elif settings.openai_api_key:
+
+    elif provider == "openai" and settings.openai_api_key:
         from openai import OpenAI
         client = OpenAI(api_key=settings.openai_api_key)
-        model = OPENAI_FAST  # GPT-4o-mini for both tiers (cheapest OpenAI option)
+        model = MODELS["openai"][model_tier]
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -242,8 +262,12 @@ def _call_llm(system: str, prompt: str, model_tier: str = "fast") -> str:
             response_format={"type": "json_object"},
         )
         return response.choices[0].message.content
+
     else:
-        raise RuntimeError("No LLM API key configured")
+        raise RuntimeError(
+            f"No API key configured for provider '{provider}'. "
+            "Set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY in .env"
+        )
 
 
 def _parse_response(response_text: str) -> list[MatchResult]:
