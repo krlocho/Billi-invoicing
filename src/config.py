@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     google_api_key: str = ""
     default_llm_provider: str = "google"  # "anthropic", "openai", or "google"
-    default_llm_model: str = "gemini-2.0-flash"
+    default_llm_model: str = "gemini-2.5-flash"
 
     # Invoice — tax is configurable per tenant, NOT hardcoded
     # IGIC 7% (Canarias), IVA 10% (Spain mainland), VAT varies (EU)

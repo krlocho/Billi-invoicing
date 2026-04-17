@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 MODELS = {
     "anthropic": {"fast": "claude-haiku-4-5-20251001", "smart": "claude-sonnet-4-6-20250514"},
     "openai": {"fast": "gpt-4o-mini", "smart": "gpt-4o-mini"},
-    "google": {"fast": "gemini-2.0-flash", "smart": "gemini-2.5-pro-preview-06-05"},
+    "google": {"fast": "gemini-2.5-flash", "smart": "gemini-2.5-pro"},
 }
 AMBIGUITY_THRESHOLD = 0.70  # Below this, escalate to stronger model
 
@@ -207,8 +207,13 @@ def _llm_match(
     )
 
     try:
+        logger.info(f"Calling LLM ({model_tier}) with {len(transactions)} transactions and {len(reservations)} reservations")
         response_text = _call_llm(system, user_prompt, model_tier)
-        return _parse_response(response_text)
+        logger.info(f"LLM response length: {len(response_text)} chars")
+        logger.info(f"LLM response preview: {response_text[:500]}")
+        matches = _parse_response(response_text)
+        logger.info(f"Parsed {len(matches)} matches from LLM response")
+        return matches
     except Exception as e:
         logger.error(f"LLM matching failed ({model_tier}): {e}")
         return []

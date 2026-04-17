@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_current_user
@@ -13,8 +13,21 @@ from src.utils.storage import save_upload
 router = APIRouter()
 
 
+def _process_bank_upload(upload_id: str):
+    """Process bank statement synchronously."""
+    from src.tasks.ocr_tasks import _process_bank_statement_sync
+    _process_bank_statement_sync(upload_id)
+
+
+def _process_channel_upload(upload_id: str):
+    """Process channel file synchronously."""
+    from src.tasks.ocr_tasks import _process_channel_file_sync
+    _process_channel_file_sync(upload_id)
+
+
 @router.post("/bank-statement", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_bank_statement(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -36,20 +49,13 @@ async def upload_bank_statement(
     db.commit()
     db.refresh(upload)
 
-    # Trigger OCR processing — try async (Celery), fallback to sync
-    try:
-        from src.tasks.ocr_tasks import process_bank_statement
-        process_bank_statement.delay(str(upload.id))
-    except Exception:
-        import threading
-        from src.tasks.ocr_tasks import _process_bank_statement_sync
-        threading.Thread(target=_process_bank_statement_sync, args=(str(upload.id),)).start()
-
+    background_tasks.add_task(_process_bank_upload, str(upload.id))
     return upload
 
 
 @router.post("/channel-file", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_channel_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     channel_id: str = Form(...),
     db: Session = Depends(get_db),
@@ -73,15 +79,7 @@ async def upload_channel_file(
     db.commit()
     db.refresh(upload)
 
-    # Trigger CSV parsing — try async (Celery), fallback to sync
-    try:
-        from src.tasks.ocr_tasks import process_channel_file
-        process_channel_file.delay(str(upload.id))
-    except Exception:
-        import threading
-        from src.tasks.ocr_tasks import _process_channel_file_sync
-        threading.Thread(target=_process_channel_file_sync, args=(str(upload.id),)).start()
-
+    background_tasks.add_task(_process_channel_upload, str(upload.id))
     return upload
 
 

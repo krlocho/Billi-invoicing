@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_current_user
@@ -18,9 +18,16 @@ from src.schemas.reconciliation import (
 router = APIRouter()
 
 
+def _run_reconciliation_task(reconciliation_id: str, bank_upload_id: str, channel_upload_ids: list[str]):
+    """Run reconciliation synchronously."""
+    from src.tasks.reconciliation_tasks import _run_reconciliation_sync
+    _run_reconciliation_sync(reconciliation_id, bank_upload_id, channel_upload_ids)
+
+
 @router.post("/", response_model=ReconciliationResponse, status_code=status.HTTP_201_CREATED)
 def create_reconciliation(
     req: ReconciliationCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -33,23 +40,12 @@ def create_reconciliation(
     db.commit()
     db.refresh(reconciliation)
 
-    # Trigger reconciliation — try async (Celery), fallback to sync
-    try:
-        from src.tasks.reconciliation_tasks import run_reconciliation
-        run_reconciliation.delay(
-            str(reconciliation.id),
-            req.bank_upload_id,
-            req.channel_upload_ids,
-        )
-    except Exception:
-        # Celery not available — run synchronously in background thread
-        import threading
-        from src.tasks.reconciliation_tasks import _run_reconciliation_sync
-        t = threading.Thread(
-            target=_run_reconciliation_sync,
-            args=(str(reconciliation.id), req.bank_upload_id, req.channel_upload_ids),
-        )
-        t.start()
+    background_tasks.add_task(
+        _run_reconciliation_task,
+        str(reconciliation.id),
+        req.bank_upload_id,
+        req.channel_upload_ids,
+    )
 
     return reconciliation
 
