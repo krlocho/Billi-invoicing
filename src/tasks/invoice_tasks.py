@@ -6,6 +6,7 @@ from src.celery_app import celery
 from src.config import settings
 from src.database import SessionLocal
 from src.invoice_gen.generator import generate_invoice_pdf
+from src.models.bank_transaction import BankTransaction
 from src.models.channel_reservation import ChannelReservation
 from src.models.invoice import Invoice
 from src.models.reconciliation import MatchReservation, ReconciliationMatch
@@ -14,9 +15,8 @@ from src.models.tenant import Tenant
 logger = logging.getLogger(__name__)
 
 
-@celery.task(bind=True, max_retries=2)
-def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_ids: list[str] | None):
-    """Generate invoice PDFs for confirmed reconciliation matches."""
+def _generate_invoices_sync(tenant_id: str, reconciliation_id: str, match_ids: list[str] | None):
+    """Generate invoice PDFs for confirmed reconciliation matches (synchronous)."""
     db = SessionLocal()
     try:
         tenant = db.query(Tenant).filter(Tenant.id == uuid.UUID(tenant_id)).first()
@@ -24,43 +24,68 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
             logger.error(f"Tenant {tenant_id} not found")
             return
 
-        # Get confirmed matches
-        query = db.query(ReconciliationMatch).filter(
-            ReconciliationMatch.reconciliation_id == uuid.UUID(reconciliation_id),
-            ReconciliationMatch.status == "confirmed",
+        # Get confirmed matches joined with bank transactions, ordered by tx date
+        # (Spain legal requirement: invoice numbering must follow chronological order)
+        query = (
+            db.query(ReconciliationMatch, BankTransaction)
+            .join(BankTransaction, ReconciliationMatch.bank_transaction_id == BankTransaction.id)
+            .filter(
+                ReconciliationMatch.reconciliation_id == uuid.UUID(reconciliation_id),
+                ReconciliationMatch.status == "confirmed",
+            )
+            .order_by(BankTransaction.transaction_date.asc(), BankTransaction.id.asc())
         )
         if match_ids:
             query = query.filter(ReconciliationMatch.id.in_([uuid.UUID(mid) for mid in match_ids]))
 
-        matches = query.all()
+        match_rows = query.all()
 
-        # Get next invoice number
-        last_invoice = (
+        # Determine next invoice number — find highest existing for the year
+        # so newly generated invoices continue the sequence chronologically.
+        existing_invoices = (
             db.query(Invoice)
             .filter(Invoice.tenant_id == uuid.UUID(tenant_id))
-            .order_by(Invoice.created_at.desc())
-            .first()
+            .all()
         )
-        year = date.today().year
-        if last_invoice and last_invoice.invoice_number.startswith(str(year)):
-            last_num = int(last_invoice.invoice_number.split("/")[-1])
-        else:
-            last_num = 0
+        # Use earliest tx date of this batch to decide year of issuance
+        batch_year = match_rows[0][1].transaction_date.year if match_rows else date.today().year
+        last_num = 0
+        last_issue_date_for_year: date | None = None
+        for inv in existing_invoices:
+            if inv.invoice_number.startswith(f"{batch_year}/"):
+                try:
+                    n = int(inv.invoice_number.split("/")[-1])
+                    if n > last_num:
+                        last_num = n
+                        last_issue_date_for_year = inv.issue_date
+                except ValueError:
+                    pass
+
+        # Guard: any new invoice's issue_date must be >= the last issued one for that year.
+        # If a confirmed match has an earlier bank tx date, refuse to violate ordering.
+        if last_issue_date_for_year is not None and match_rows:
+            earliest_in_batch = match_rows[0][1].transaction_date
+            if earliest_in_batch < last_issue_date_for_year:
+                logger.error(
+                    f"Refusing to generate invoices: earliest tx in batch ({earliest_in_batch}) "
+                    f"is before last issued invoice date ({last_issue_date_for_year}) for year {batch_year}"
+                )
+                return
 
         generated = 0
-        for match in matches:
-            # Get reservations for this match
-            match_res = db.query(MatchReservation).filter(
-                MatchReservation.match_id == match.id
-            ).all()
+        for match, bank_tx in match_rows:
+            # Get reservations for this match, ordered by checkout_date for stability
+            match_res = (
+                db.query(MatchReservation, ChannelReservation)
+                .join(ChannelReservation, MatchReservation.reservation_id == ChannelReservation.id)
+                .filter(MatchReservation.match_id == match.id)
+                .order_by(ChannelReservation.checkout_date.asc(), ChannelReservation.id.asc())
+                .all()
+            )
 
-            for mr in match_res:
-                reservation = db.query(ChannelReservation).filter(
-                    ChannelReservation.id == mr.reservation_id
-                ).first()
-                if not reservation:
-                    continue
+            issue_date_value = bank_tx.transaction_date
 
+            for _mr, reservation in match_res:
                 # Check if invoice already exists
                 existing = db.query(Invoice).filter(
                     Invoice.reservation_id == reservation.id
@@ -69,7 +94,7 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
                     continue
 
                 last_num += 1
-                invoice_number = f"{year}/{last_num:04d}"
+                invoice_number = f"{issue_date_value.year}/{last_num:04d}"
 
                 # Tax rate from tenant settings (IGIC, IVA, VAT, etc.)
                 tenant_tax_rate = tenant.settings.get("tax_rate", settings.default_tax_rate)
@@ -90,24 +115,31 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
                     }
                 ]
 
-                pdf_path = generate_invoice_pdf(
-                    invoice_number=invoice_number,
-                    hotel_name=tenant.name,
-                    hotel_tax_id=tenant.tax_id or "N/A",
-                    hotel_address=tenant.address or "",
-                    guest_name=reservation.guest_name or "N/A",
-                    guest_tax_id=None,
-                    issue_date=date.today(),
-                    checkin_date=reservation.checkin_date,
-                    checkout_date=reservation.checkout_date,
-                    line_items=line_items,
-                    subtotal=subtotal,
-                    tax_rate=tax_rate,
-                    tax_amount=tax_amount,
-                    total=gross,
-                    currency=reservation.currency,
-                    tax_name=tenant.settings.get("tax_type", settings.default_tax_type),
-                )
+                try:
+                    pdf_path = generate_invoice_pdf(
+                        invoice_number=invoice_number,
+                        hotel_name=tenant.name,
+                        hotel_tax_id=tenant.tax_id or "N/A",
+                        hotel_address=tenant.address or "",
+                        guest_name=reservation.guest_name or "N/A",
+                        guest_tax_id=None,
+                        issue_date=issue_date_value,
+                        checkin_date=reservation.checkin_date,
+                        checkout_date=reservation.checkout_date,
+                        line_items=line_items,
+                        subtotal=subtotal,
+                        tax_rate=tax_rate,
+                        tax_amount=tax_amount,
+                        total=gross,
+                        currency=reservation.currency,
+                        tax_name=tenant.settings.get("tax_type", settings.default_tax_type),
+                    )
+                except OSError as pdf_err:
+                    # PDF rendering env issue (e.g. WeasyPrint missing libs);
+                    # persist the invoice record so accounting state is correct
+                    # and the PDF can be regenerated later.
+                    logger.warning(f"PDF generation failed for {invoice_number}: {pdf_err}")
+                    pdf_path = None
 
                 invoice = Invoice(
                     tenant_id=uuid.UUID(tenant_id),
@@ -115,7 +147,7 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
                     reservation_id=reservation.id,
                     match_id=match.id,
                     guest_name=reservation.guest_name,
-                    issue_date=date.today(),
+                    issue_date=issue_date_value,
                     checkin_date=reservation.checkin_date,
                     checkout_date=reservation.checkout_date,
                     subtotal=subtotal,
@@ -136,6 +168,15 @@ def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_i
     except Exception as e:
         db.rollback()
         logger.error(f"Invoice generation failed: {e}")
-        raise self.retry(exc=e, countdown=60)
+        raise
     finally:
         db.close()
+
+
+@celery.task(bind=True, max_retries=2)
+def generate_invoices_task(self, tenant_id: str, reconciliation_id: str, match_ids: list[str] | None):
+    """Celery wrapper (kept for production use)."""
+    try:
+        _generate_invoices_sync(tenant_id, reconciliation_id, match_ids)
+    except Exception as e:
+        raise self.retry(exc=e, countdown=60)

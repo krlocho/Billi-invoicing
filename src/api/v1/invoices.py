@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -13,14 +13,20 @@ from src.schemas.invoice import InvoiceGenerateRequest, InvoiceResponse
 router = APIRouter()
 
 
+def _generate_invoices_bg(tenant_id: str, reconciliation_id: str, match_ids: list[str] | None):
+    from src.tasks.invoice_tasks import _generate_invoices_sync
+    _generate_invoices_sync(tenant_id, reconciliation_id, match_ids)
+
+
 @router.post("/generate", response_model=list[InvoiceResponse], status_code=201)
 def generate_invoices(
     req: InvoiceGenerateRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    from src.tasks.invoice_tasks import generate_invoices_task
-    generate_invoices_task.delay(
+    background_tasks.add_task(
+        _generate_invoices_bg,
         str(user.tenant_id),
         req.reconciliation_id,
         req.match_ids,
