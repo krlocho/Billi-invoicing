@@ -92,11 +92,15 @@ def _do_reconciliation(reconciliation_id: str, bank_upload_id: str, channel_uplo
         feedback_examples = _load_feedback_examples(db, rec.tenant_id)
 
         # Build tenant-specific context (variable commissions, taxes, etc.)
-        tenant_context = _build_tenant_context(db, rec.tenant_id)
+        # and load the learned-commission lookup so the validator and the LLM
+        # both work off observed rates instead of hardcoded defaults.
+        from src.matching.learned_commission import learned_rate_lookup
+        commission_lookup = learned_rate_lookup(db, rec.tenant_id)
+        tenant_context = _build_tenant_context(db, rec.tenant_id, commission_lookup)
 
         # Run matching with RAG + tiered LLM
         matches: list[MatchResult] = run_matching(
-            tx_data, res_data, feedback_examples, tenant_context
+            tx_data, res_data, feedback_examples, tenant_context, commission_lookup
         )
 
         # Store results
@@ -165,7 +169,7 @@ def _do_reconciliation(reconciliation_id: str, bank_upload_id: str, channel_uplo
         db.close()
 
 
-def _build_tenant_context(db, tenant_id) -> str:
+def _build_tenant_context(db, tenant_id, commission_lookup: dict | None = None) -> str:
     """Build tenant-specific context for LLM — variable commissions, taxes, bank formats.
 
     This is what makes the system work for ANY hotel, not just one.
@@ -174,6 +178,7 @@ def _build_tenant_context(db, tenant_id) -> str:
     from src.models.channel import Channel
     from src.models.tenant import Tenant
 
+    commission_lookup = commission_lookup or {}
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     channels = db.query(Channel).filter(Channel.tenant_id == tenant_id).all()
 
@@ -189,10 +194,17 @@ def _build_tenant_context(db, tenant_id) -> str:
         lines.append("Channel commissions:")
         for ch in channels:
             config = ch.commission_config or {}
-            base = config.get("base_rate", "unknown")
-            psf = config.get("psf_rate", 0)
+            learned = commission_lookup.get(ch.code.lower())
             patterns = ch.bank_description_patterns or []
-            line = f"  {ch.name}: {float(base)*100 if isinstance(base, (int,float)) else base}%"
+            if learned and learned.get("is_learned"):
+                line = (
+                    f"  {ch.name}: learned {learned['rate']*100:.2f}% "
+                    f"(over {learned['sample_size']} confirmed matches — use as authoritative rate)"
+                )
+            else:
+                base = config.get("base_rate", "unknown")
+                line = f"  {ch.name}: {float(base)*100 if isinstance(base, (int,float)) else base}% (default — not yet learned)"
+            psf = config.get("psf_rate", 0)
             if psf:
                 line += f" + {float(psf)*100}% PSF"
             if patterns:

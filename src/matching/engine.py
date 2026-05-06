@@ -91,10 +91,17 @@ def run_matching(
     reservations: list[ReservationData],
     feedback_examples: list[dict] | None = None,
     tenant_context: str = "",
+    commission_lookup: dict[str, dict] | None = None,
 ) -> list[MatchResult]:
-    """Run LLM-first matching with RAG augmentation and tiered models."""
+    """Run LLM-first matching with RAG augmentation and tiered models.
+
+    `commission_lookup` maps channel_code -> {rate, sample_size, is_learned, psf_rate}
+    and is used by the algorithmic validator instead of hardcoded rates.
+    """
     if not transactions or not reservations:
         return []
+
+    commission_lookup = commission_lookup or {}
 
     # Step 1: Detect channels from bank descriptions
     detected_channels = [_detect_channel(tx.description) for tx in transactions]
@@ -112,7 +119,7 @@ def run_matching(
     validated = []
     ambiguous_txs = []
     for match in llm_matches:
-        result = _validate_match(match, transactions, reservations)
+        result = _validate_match(match, transactions, reservations, commission_lookup)
         if result.confidence_score < AMBIGUITY_THRESHOLD:
             ambiguous_txs.append(result)
         else:
@@ -130,7 +137,7 @@ def run_matching(
                 rag_context, tenant_context, model_tier="smart",
             )
             for match in retry_matches:
-                result = _validate_match(match, transactions, reservations)
+                result = _validate_match(match, transactions, reservations, commission_lookup)
                 result.match_type = "hybrid_escalated"
                 validated.append(result)
 
@@ -315,8 +322,10 @@ def _validate_match(
     match: MatchResult,
     transactions: list[TransactionData],
     reservations: list[ReservationData],
+    commission_lookup: dict[str, dict] | None = None,
 ) -> MatchResult:
     """Validate LLM match with algorithmic checks."""
+    commission_lookup = commission_lookup or {}
     tx = next((t for t in transactions if t.id == match.bank_transaction_id), None)
     if not tx:
         # Try short ID match
@@ -341,10 +350,19 @@ def _validate_match(
 
     scores = {}
 
-    # 1. Amount validation
+    # 1. Amount validation — prefer learned commission for this channel
     channel_code = match.details.get("channel") or _detect_channel(tx.description) or "booking"
+    learned = commission_lookup.get(channel_code.lower())
+    tenant_config = (
+        {"learned_rate": learned["rate"], "psf_rate": learned.get("psf_rate", 0)}
+        if learned
+        else None
+    )
+    if learned:
+        match.details["learned_commission_rate"] = learned["rate"]
+        match.details["learned_commission_samples"] = learned.get("sample_size", 0)
     gross_amounts = [r.gross_amount or 0 for r in matched_res]
-    expected_net = calculate_expected_net_for_group(gross_amounts, channel_code)
+    expected_net = calculate_expected_net_for_group(gross_amounts, channel_code, tenant_config)
     amount_ok, amount_diff = amount_matches(abs(tx.amount), expected_net, tolerance_pct=0.05)
     match.amount_difference = round(amount_diff, 2)
     scores["amount"] = 1.0 if amount_ok else max(0, 1 - (amount_diff / max(abs(tx.amount), 1)))

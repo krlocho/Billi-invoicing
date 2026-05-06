@@ -77,6 +77,9 @@ def get_commission_rate(
     if tenant_config:
         # Tenant config can have direct rate or rate_type mapping
         if isinstance(tenant_config, dict):
+            # Learned rate (inferred from confirmed matches) wins over base_rate
+            if "learned_rate" in tenant_config:
+                return float(tenant_config["learned_rate"])
             if rate_type in tenant_config:
                 return float(tenant_config[rate_type])
             if "base_rate" in tenant_config:

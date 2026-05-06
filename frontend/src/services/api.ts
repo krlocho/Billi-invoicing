@@ -62,8 +62,13 @@ export const createReconciliation = (bankUploadId: string, channelUploadIds: str
 
 export const getReconciliation = (id: string) => api.get(`/reconciliations/${id}`);
 export const getMatches = (reconciliationId: string) => api.get(`/reconciliations/${reconciliationId}/matches`);
-export const updateMatch = (reconciliationId: string, matchId: string, data: { status: string }) =>
-  api.put(`/reconciliations/${reconciliationId}/matches/${matchId}`, data);
+export const getUnmatchedTransactions = (reconciliationId: string) =>
+  api.get(`/reconciliations/${reconciliationId}/unmatched-transactions`);
+export const updateMatch = (
+  reconciliationId: string,
+  matchId: string,
+  data: { status: string; reservation_ids?: string[] },
+) => api.put(`/reconciliations/${reconciliationId}/matches/${matchId}`, data);
 export const confirmAllHigh = (reconciliationId: string) =>
   api.post(`/reconciliations/${reconciliationId}/confirm-all`);
 
