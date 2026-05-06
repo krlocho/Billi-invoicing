@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Upload from './pages/Upload';
 import Reconciliation from './pages/Reconciliation';
 import Invoices from './pages/Invoices';
+import HotelSettings from './pages/HotelSettings';
 import AppLayout from './components/AppLayout';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="upload" element={<Upload />} />
           <Route path="reconciliation/:id" element={<Reconciliation />} />
           <Route path="invoices" element={<Invoices />} />
+          <Route path="settings" element={<HotelSettings />} />
         </Route>
       </Routes>
     </BrowserRouter>

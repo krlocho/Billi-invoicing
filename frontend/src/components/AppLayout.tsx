@@ -1,10 +1,11 @@
 import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { Upload, FileText, LayoutDashboard, LogOut, Receipt } from 'lucide-react';
+import { Upload, FileText, LayoutDashboard, LogOut, Receipt, Settings } from 'lucide-react';
 
 const nav = [
   { to: '/app', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/app/upload', icon: Upload, label: 'Subir Ficheros' },
   { to: '/app/invoices', icon: Receipt, label: 'Facturas' },
+  { to: '/app/settings', icon: Settings, label: 'Configuración' },
 ];
 
 export default function AppLayout() {

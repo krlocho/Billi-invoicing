@@ -1,6 +1,21 @@
 import { useEffect, useState } from 'react';
 import { Receipt, Download, FileText } from 'lucide-react';
-import { getInvoices, getInvoicePdf } from '../services/api';
+import api, { getInvoices } from '../services/api';
+
+async function openInvoicePdf(id: string, invoiceNumber: string) {
+  const response = await api.get(`/invoices/${id}/pdf`, { responseType: 'blob' });
+  const blob = new Blob([response.data], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.download = `factura_${invoiceNumber.replace('/', '-')}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
 
 export default function Invoices() {
   const [invoices, setInvoices] = useState<any[]>([]);
@@ -69,14 +84,12 @@ export default function Invoices() {
                     </span>
                   </td>
                   <td className="px-6 py-4">
-                    <a
-                      href={getInvoicePdf(inv.id)}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      onClick={() => openInvoicePdf(inv.id, inv.invoice_number)}
                       className="flex items-center gap-1 text-sm text-violet-600 hover:text-violet-700 font-medium"
                     >
                       <Download className="w-4 h-4" /> PDF
-                    </a>
+                    </button>
                   </td>
                 </tr>
               ))}

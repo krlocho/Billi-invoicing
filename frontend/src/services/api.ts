@@ -36,6 +36,15 @@ export const login = (email: string, password: string) =>
 export const register = (data: { email: string; password: string; full_name: string; tenant_name: string }) =>
   api.post('/auth/register', data);
 
+// Tenant (hotel) settings
+export const getMyTenant = () => api.get('/tenants/me');
+export const updateMyTenant = (data: {
+  name?: string;
+  tax_id?: string;
+  address?: string;
+  settings?: { tax_type: string; tax_rate: number; country?: string | null; region?: string | null };
+}) => api.put('/tenants/me', data);
+
 // Channels
 export const getChannels = () => api.get('/channels/');
 

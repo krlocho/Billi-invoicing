@@ -153,13 +153,13 @@ def generate_invoice_pdf(
     rows = [["Descripción", "Noches", f"Precio/Noche ({currency})", f"Importe ({currency})"]]
     for item in line_items:
         rows.append([
-            item.get("description", ""),
+            Paragraph(item.get("description", ""), s["body"]),
             str(item.get("quantity", "")),
             str(item.get("unit_price", "")),
             str(item.get("amount", "")),
         ])
     items_tbl = Table(rows, colWidths=[
-        doc.width * 0.46, doc.width * 0.12, doc.width * 0.21, doc.width * 0.21,
+        doc.width * 0.50, doc.width * 0.10, doc.width * 0.20, doc.width * 0.20,
     ])
     items_tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
