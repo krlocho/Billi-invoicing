@@ -87,4 +87,18 @@ export const generateInvoices = (reconciliationId: string, matchIds?: string[]) 
 export const getInvoices = () => api.get('/invoices/');
 export const getInvoicePdf = (id: string) => `/api/v1/invoices/${id}/pdf`;
 
+// Labeling (independent ground truth — no system predictions visible)
+export const getLabelingDataset = (reconciliationId: string) =>
+  api.get(`/labeling/${reconciliationId}/dataset`);
+export const getLabels = (reconciliationId: string) =>
+  api.get(`/labeling/${reconciliationId}/labels`);
+export const saveLabel = (
+  reconciliationId: string,
+  data: { bank_transaction_id: string; reservation_ids: string[]; label_type: 'match' | 'no_match' },
+) => api.post(`/labeling/${reconciliationId}/labels`, data);
+export const deleteLabel = (reconciliationId: string, bankTransactionId: string) =>
+  api.delete(`/labeling/${reconciliationId}/labels/${bankTransactionId}`);
+export const getLabelingProgress = (reconciliationId: string) =>
+  api.get(`/labeling/${reconciliationId}/progress`);
+
 export default api;

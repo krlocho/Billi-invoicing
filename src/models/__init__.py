@@ -7,6 +7,7 @@ from src.models.channel_reservation import ChannelReservation
 from src.models.reconciliation import Reconciliation, ReconciliationMatch, MatchReservation
 from src.models.invoice import Invoice
 from src.models.feedback import ReconciliationFeedback
+from src.models.evaluation_label import EvaluationLabel
 
 __all__ = [
     "Tenant",
@@ -20,4 +21,5 @@ __all__ = [
     "MatchReservation",
     "Invoice",
     "ReconciliationFeedback",
+    "EvaluationLabel",
 ]

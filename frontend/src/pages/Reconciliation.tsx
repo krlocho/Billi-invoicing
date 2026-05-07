@@ -261,6 +261,12 @@ export default function Reconciliation() {
         </div>
         {rec?.status === 'completed' && (
           <div className="flex gap-2 shrink-0">
+            <a
+              href={`/app/labeling/${id}`}
+              className="text-sm bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 px-4 py-2 rounded-lg font-medium inline-flex items-center"
+            >
+              Etiquetar para evaluación
+            </a>
             <button
               onClick={handleConfirmAll}
               disabled={busy}

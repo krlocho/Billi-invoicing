@@ -20,6 +20,7 @@ from src.matching.engine import ReservationData, TransactionData
 from src.models.bank_transaction import BankTransaction
 from src.models.channel import Channel
 from src.models.channel_reservation import ChannelReservation
+from src.models.evaluation_label import EvaluationLabel
 from src.models.reconciliation import (
     MatchReservation,
     Reconciliation,
@@ -58,7 +59,20 @@ def _channel_code(db: Session, channel_id) -> str | None:
     return ch.code if ch else None
 
 
-def build_dataset(db: Session, reconciliation_id: str) -> EvaluationDataset:
+def build_dataset(
+    db: Session,
+    reconciliation_id: str,
+    truth_source: str = "system",
+) -> EvaluationDataset:
+    """Build an evaluation dataset.
+
+    truth_source:
+      - "system":   ground truth = matches the system produced + user
+                    confirmed/rejected (selection-biased, but available
+                    as soon as the user reviews the matches).
+      - "manual":   ground truth = independent labels from the labeling
+                    UI (unbiased, requires the user to label first).
+    """
     rec = db.query(Reconciliation).filter(
         Reconciliation.id == uuid.UUID(reconciliation_id)
     ).first()
@@ -72,38 +86,62 @@ def build_dataset(db: Session, reconciliation_id: str) -> EvaluationDataset:
         .all()
     )
 
-    # Reservations linked to any match in this reconciliation, plus any other
-    # reservations of this tenant that were unreconciled at the time. We
-    # approximate the input snapshot as: every reservation referenced by a
-    # match (in any state). For unmatched reservations we have no good signal.
-    matches = (
-        db.query(ReconciliationMatch)
-        .filter(ReconciliationMatch.reconciliation_id == rec.id)
-        .all()
-    )
-    res_ids: set = set()
     truth: list[GroundTruthMatch] = []
-    for m in matches:
-        rids = [
-            mr.reservation_id
-            for mr in db.query(MatchReservation)
-            .filter(MatchReservation.match_id == m.id)
-            .all()
-        ]
-        res_ids.update(rids)
-        truth.append(GroundTruthMatch(
-            bank_transaction_id=str(m.bank_transaction_id),
-            reservation_ids=frozenset(str(r) for r in rids),
-            status=m.status,
-        ))
+    res_ids: set = set()
 
-    reservations = (
-        db.query(ChannelReservation)
-        .filter(ChannelReservation.id.in_(res_ids))
-        .all()
-        if res_ids
-        else []
-    )
+    if truth_source == "manual":
+        labels = (
+            db.query(EvaluationLabel)
+            .filter(EvaluationLabel.reconciliation_id == rec.id)
+            .all()
+        )
+        for l in labels:
+            rids = [str(r) for r in (l.reservation_ids or [])]
+            res_ids.update(rids)
+            truth.append(GroundTruthMatch(
+                bank_transaction_id=str(l.bank_transaction_id),
+                reservation_ids=frozenset(rids),
+                # Map labeling status to truth status: 'match' is the gold
+                # positive set; 'no_match' is the gold negative set.
+                status="confirmed" if l.label_type == "match" else "rejected",
+            ))
+        # Reservations: every reservation referenced by any label, plus any
+        # reservation of this tenant we know about (so the strategies that
+        # consume the dataset still see the full candidate pool).
+        all_reservations = (
+            db.query(ChannelReservation)
+            .filter(ChannelReservation.tenant_id == rec.tenant_id)
+            .all()
+        )
+        reservations = all_reservations
+    elif truth_source == "system":
+        matches = (
+            db.query(ReconciliationMatch)
+            .filter(ReconciliationMatch.reconciliation_id == rec.id)
+            .all()
+        )
+        for m in matches:
+            rids = [
+                mr.reservation_id
+                for mr in db.query(MatchReservation)
+                .filter(MatchReservation.match_id == m.id)
+                .all()
+            ]
+            res_ids.update(rids)
+            truth.append(GroundTruthMatch(
+                bank_transaction_id=str(m.bank_transaction_id),
+                reservation_ids=frozenset(str(r) for r in rids),
+                status=m.status,
+            ))
+        reservations = (
+            db.query(ChannelReservation)
+            .filter(ChannelReservation.id.in_(res_ids))
+            .all()
+            if res_ids
+            else []
+        )
+    else:
+        raise ValueError(f"Unknown truth_source: {truth_source}")
 
     tx_data = [
         TransactionData(

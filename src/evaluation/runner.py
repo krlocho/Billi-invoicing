@@ -45,6 +45,12 @@ def main(argv: list[str]) -> int:
         default="algorithmic_only",
         help=f"comma-separated subset of {','.join(STRATEGIES)}",
     )
+    parser.add_argument(
+        "--truth",
+        choices=["system", "manual"],
+        default="system",
+        help="ground truth source: 'system' = confirmed matches (biased), 'manual' = independent labels",
+    )
     parser.add_argument("--output", default=None, help="optional path to write JSON results")
     args = parser.parse_args(argv)
 
@@ -56,8 +62,8 @@ def main(argv: list[str]) -> int:
 
     db = SessionLocal()
     try:
-        ds = build_dataset(db, args.reconciliation_id)
-        log.info(f"Reconciliation: {ds.reconciliation_id}")
+        ds = build_dataset(db, args.reconciliation_id, truth_source=args.truth)
+        log.info(f"Reconciliation: {ds.reconciliation_id}  (truth: {args.truth})")
         log.info(f"  bank transactions: {len(ds.transactions)}")
         log.info(f"  reservations:      {len(ds.reservations)}")
         log.info(f"  ground truth (confirmed): {len(ds.positive_truth)}")

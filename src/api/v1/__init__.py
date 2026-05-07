@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from src.api.v1 import auth, uploads, reconciliations, invoices, channels, tenants
+from src.api.v1 import auth, uploads, reconciliations, invoices, channels, tenants, labeling
 
 router = APIRouter()
 router.include_router(auth.router, prefix="/auth", tags=["Auth"])
@@ -9,3 +9,4 @@ router.include_router(channels.router, prefix="/channels", tags=["Channels"])
 router.include_router(uploads.router, prefix="/uploads", tags=["Uploads"])
 router.include_router(reconciliations.router, prefix="/reconciliations", tags=["Reconciliations"])
 router.include_router(invoices.router, prefix="/invoices", tags=["Invoices"])
+router.include_router(labeling.router, prefix="/labeling", tags=["Labeling"])
