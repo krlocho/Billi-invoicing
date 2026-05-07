@@ -89,12 +89,25 @@ export default function Labeling() {
   }, [reservations]);
 
   const filteredReservations = useMemo(() => {
-    const q = resQuery.toLowerCase().trim();
+    const q = resQuery.trim();
+    const qLower = q.toLowerCase();
+    // If the query parses as a number (with . or , as decimal), match by amount.
+    // We accept anything within ±0.5 EUR so the user doesn't have to type
+    // exact decimals to find a 488.82 reservation.
+    const qAmount = Number(q.replace(',', '.'));
+    const isAmountQuery = q.length > 0 && Number.isFinite(qAmount);
     return reservations.filter((r) => {
       if (channelFilter && r.channel !== channelFilter) return false;
       if (!q) return true;
-      const blob = `${r.guest_name || ''} ${r.reservation_id || ''} ${r.channel || ''}`.toLowerCase();
-      return blob.includes(q);
+      if (isAmountQuery) {
+        const targets = [r.net_amount, r.gross_amount].filter(
+          (n): n is number => n != null,
+        );
+        if (targets.some((n) => Math.abs(n - qAmount) < 0.5)) return true;
+        // Also keep substring search so typing "488" matches "1488.82" etc.
+      }
+      const blob = `${r.guest_name || ''} ${r.reservation_id || ''} ${r.channel || ''} ${r.net_amount ?? ''} ${r.gross_amount ?? ''}`.toLowerCase();
+      return blob.includes(qLower);
     });
   }, [reservations, resQuery, channelFilter]);
 
@@ -352,10 +365,29 @@ export default function Labeling() {
               <input
                 value={resQuery}
                 onChange={(e) => setResQuery(e.target.value)}
-                placeholder="Buscar reserva (nombre, canal, ID)..."
+                placeholder="Buscar (nombre, ID, importe…)"
                 className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-md text-sm"
               />
             </div>
+            {activeTx && (
+              <div className="flex gap-1 flex-wrap">
+                <button
+                  onClick={() => setResQuery(Math.abs(activeTx.amount).toFixed(2))}
+                  className="px-2 py-0.5 rounded text-xs bg-violet-100 text-violet-800 hover:bg-violet-200"
+                  title="Filtra reservas cuyo neto coincide con el pago bancario"
+                >
+                  ≈ {Math.abs(activeTx.amount).toFixed(2)} €
+                </button>
+                {resQuery && (
+                  <button
+                    onClick={() => setResQuery('')}
+                    className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  >
+                    × limpiar
+                  </button>
+                )}
+              </div>
+            )}
             <div className="flex gap-1 flex-wrap">
               <button
                 onClick={() => setChannelFilter('')}
