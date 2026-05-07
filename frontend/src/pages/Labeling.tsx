@@ -270,10 +270,18 @@ export default function Labeling() {
                 {Array.from(selectedRes).map((rid) => {
                   const r = reservations.find((x) => x.id === rid);
                   if (!r) return null;
+                  const name =
+                    r.guest_name ||
+                    (r.reservation_id ? `Reserva ${r.reservation_id}` : 'Reserva sin id');
                   return (
                     <div key={rid} className="flex items-center justify-between text-sm">
                       <span>
-                        {r.guest_name} <span className="text-gray-400">· {r.channel}</span>
+                        {name} <span className="text-gray-400">· {r.channel}</span>
+                        {r.checkin_date && (
+                          <span className="text-gray-400 text-xs ml-1">
+                            ({fmt(r.checkin_date)} → {fmt(r.checkout_date)})
+                          </span>
+                        )}
                       </span>
                       <span className="text-gray-600 tabular-nums">{eur(r.gross_amount, r.currency)}</span>
                     </div>
@@ -369,6 +377,9 @@ export default function Labeling() {
             {filteredReservations.map((r) => {
               const sel = selectedRes.has(r.id);
               const used = usedElsewhere.has(r.id);
+              const displayName =
+                r.guest_name ||
+                (r.reservation_id ? `Reserva ${r.reservation_id}` : 'Reserva sin id');
               return (
                 <button
                   key={r.id}
@@ -382,8 +393,12 @@ export default function Labeling() {
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span className="font-medium text-gray-900 truncate">
-                      {r.guest_name || <i className="text-gray-400">sin nombre</i>}
+                    <span
+                      className={`font-medium truncate ${
+                        r.guest_name ? 'text-gray-900' : 'text-gray-600 font-mono text-xs'
+                      }`}
+                    >
+                      {displayName}
                     </span>
                     <span className="text-xs text-gray-500">{r.channel}</span>
                   </div>
