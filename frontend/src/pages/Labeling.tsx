@@ -283,17 +283,22 @@ export default function Labeling() {
                           </span>
                         )}
                       </span>
-                      <span className="text-gray-600 tabular-nums">{eur(r.gross_amount, r.currency)}</span>
+                      <span className="text-right">
+                        <span className="tabular-nums font-medium block">{eur(r.net_amount, r.currency)}</span>
+                        <span className="tabular-nums text-gray-400 text-[10px] block">
+                          {eur(r.gross_amount, r.currency)} bruto
+                        </span>
+                      </span>
                     </div>
                   );
                 })}
-                <div className="border-t border-gray-100 mt-2 pt-2 text-sm flex justify-between font-medium">
+                <div className="border-t border-gray-100 mt-2 pt-2 text-sm flex justify-between font-semibold">
+                  <span>Suma neto (lo que recibes)</span>
+                  <span className="tabular-nums">{totalReservationsAmount.net.toFixed(2)} EUR</span>
+                </div>
+                <div className="text-xs flex justify-between text-gray-500">
                   <span>Suma bruto</span>
                   <span className="tabular-nums">{totalReservationsAmount.gross.toFixed(2)} EUR</span>
-                </div>
-                <div className="text-sm flex justify-between text-gray-600">
-                  <span>Suma neto</span>
-                  <span className="tabular-nums">{totalReservationsAmount.net.toFixed(2)} EUR</span>
                 </div>
                 {activeTx && (
                   <DiffBanner
@@ -406,8 +411,13 @@ export default function Labeling() {
                     <span>
                       {fmt(r.checkin_date)} → {fmt(r.checkout_date)} · {r.nights ?? '?'}n
                     </span>
-                    <span className="tabular-nums">
-                      {eur(r.gross_amount, r.currency)} bruto
+                    <span className="text-right">
+                      <span className="tabular-nums font-medium text-gray-700 block">
+                        {eur(r.net_amount, r.currency)} neto
+                      </span>
+                      <span className="tabular-nums text-gray-400 block text-[10px]">
+                        {eur(r.gross_amount, r.currency)} bruto
+                      </span>
                     </span>
                   </div>
                   {used && (
