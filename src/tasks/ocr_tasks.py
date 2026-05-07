@@ -1,6 +1,25 @@
 import logging
 import uuid
-from datetime import date
+from datetime import date, datetime
+
+
+def _coerce_date(value) -> date | None:
+    """Parse dates from any common format channel CSVs use."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # Try the formats we actually see in channel exports, ISO first.
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s[: len(fmt) + 4], fmt).date()
+        except ValueError:
+            continue
+    try:
+        return date.fromisoformat(s[:10])
+    except (ValueError, TypeError):
+        return None
 
 from src.celery_app import celery
 from src.database import SessionLocal
@@ -133,33 +152,25 @@ def _do_process_channel_file(upload_id: str, celery_task=None):
         upload.status = "processing"
         db.commit()
 
-        # Try Booking.com parser first, then generic
+        # Try channel-specific parsers first; fall back to LLM-driven generic.
+        from src.parsers.airbnb import AirbnbParser
         from src.parsers.booking_com import BookingComParser
         from src.parsers.generic_csv import GenericCSVParser
 
-        parser = BookingComParser()
-        if parser.can_parse(upload.stored_path):
-            result = parser.parse(upload.stored_path)
-        else:
-            parser = GenericCSVParser()
-            result = parser.parse(upload.stored_path)
+        result = None
+        for parser in (BookingComParser(), AirbnbParser()):
+            if parser.can_parse(upload.stored_path):
+                result = parser.parse(upload.stored_path)
+                break
+        if result is None:
+            result = GenericCSVParser().parse(upload.stored_path)
 
         if result.errors:
             logger.warning(f"Parsing errors for {upload_id}: {result.errors}")
 
         for r in result.reservations:
-            checkin = None
-            checkout = None
-            if r.checkin_date:
-                try:
-                    checkin = date.fromisoformat(str(r.checkin_date)[:10])
-                except (ValueError, TypeError):
-                    pass
-            if r.checkout_date:
-                try:
-                    checkout = date.fromisoformat(str(r.checkout_date)[:10])
-                except (ValueError, TypeError):
-                    pass
+            checkin = _coerce_date(r.checkin_date)
+            checkout = _coerce_date(r.checkout_date)
 
             reservation = ChannelReservation(
                 upload_id=upload.id,
