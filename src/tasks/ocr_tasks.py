@@ -155,10 +155,12 @@ def _do_process_channel_file(upload_id: str, celery_task=None):
         # Try channel-specific parsers first; fall back to LLM-driven generic.
         from src.parsers.airbnb import AirbnbParser
         from src.parsers.booking_com import BookingComParser
+        from src.parsers.expedia import ExpediaParser
         from src.parsers.generic_csv import GenericCSVParser
+        from src.parsers.stripe import StripeParser
 
         result = None
-        for parser in (BookingComParser(), AirbnbParser()):
+        for parser in (BookingComParser(), AirbnbParser(), StripeParser(), ExpediaParser()):
             if parser.can_parse(upload.stored_path):
                 result = parser.parse(upload.stored_path)
                 break

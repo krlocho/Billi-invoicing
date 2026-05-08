@@ -34,6 +34,7 @@ interface Reservation {
   gross_amount: number | null;
   net_amount: number | null;
   currency: string;
+  room_type: string | null;
 }
 
 interface Label {
@@ -439,9 +440,15 @@ export default function Labeling() {
                     </span>
                     <span className="text-xs text-gray-500">{r.channel}</span>
                   </div>
+                  {r.room_type && (
+                    <div className="text-[11px] text-gray-500 truncate mb-0.5">
+                      {r.room_type}
+                    </div>
+                  )}
                   <div className="flex justify-between text-xs text-gray-500">
                     <span>
-                      {fmt(r.checkin_date)} → {fmt(r.checkout_date)} · {r.nights ?? '?'}n
+                      {fmt(r.checkin_date)} → {fmt(r.checkout_date)}
+                      {r.nights != null && r.nights > 1 && ` · ${r.nights}n`}
                     </span>
                     <span className="text-right">
                       <span className="tabular-nums font-medium text-gray-700 block">

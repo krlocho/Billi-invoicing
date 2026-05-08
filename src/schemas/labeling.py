@@ -20,6 +20,7 @@ class LabelingReservation(BaseModel):
     gross_amount: float | None
     net_amount: float | None
     currency: str
+    room_type: str | None = None
 
 
 class LabelingDataset(BaseModel):

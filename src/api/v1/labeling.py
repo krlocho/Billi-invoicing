@@ -89,6 +89,7 @@ def get_dataset(
                 gross_amount=float(r.gross_amount) if r.gross_amount is not None else None,
                 net_amount=float(r.net_amount) if r.net_amount is not None else None,
                 currency=r.currency,
+                room_type=r.room_type,
             )
             for r, ch in reservations
         ],
