@@ -22,3 +22,5 @@ rag_data/ground_truth.json
 rag_data/
 /package.json
 /package-lock.json
+# evaluation artifacts — regenerable from `src/evaluation/runner.py`
+results_*.json

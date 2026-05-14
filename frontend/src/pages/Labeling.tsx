@@ -48,6 +48,24 @@ const fmt = (d: string | null) => (d ? new Date(d).toLocaleDateString('es-ES') :
 const eur = (n: number | null | undefined, cur = 'EUR') =>
   n == null ? '—' : `${n.toFixed(2)} ${cur}`;
 
+// "2025-12-15" → "15/12/2025"
+const isoToES = (iso: string | null): string => {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return '';
+  return `${d}/${m}/${y}`;
+};
+
+// Accepts: "yyyy-mm-dd", "dd/mm/yyyy", "dd-mm-yyyy". Returns ISO or null.
+const parseDateQuery = (s: string): string | null => {
+  s = s.trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return null;
+};
+
 export default function Labeling() {
   const { id } = useParams<{ id: string }>();
   const [txs, setTxs] = useState<Tx[]>([]);
@@ -92,14 +110,26 @@ export default function Labeling() {
   const filteredReservations = useMemo(() => {
     const q = resQuery.trim();
     const qLower = q.toLowerCase();
-    // If the query parses as a number (with . or , as decimal), match by amount.
-    // We accept anything within ±0.5 EUR so the user doesn't have to type
-    // exact decimals to find a 488.82 reservation.
+    // Pure number → amount search (±0.5 tolerance).
     const qAmount = Number(q.replace(',', '.'));
-    const isAmountQuery = q.length > 0 && Number.isFinite(qAmount);
+    const isAmountQuery = q.length > 0 && /^\d+([.,]\d+)?$/.test(q) && Number.isFinite(qAmount);
+    // Full date (yyyy-mm-dd or dd/mm/yyyy or dd-mm-yyyy) → strict date query.
+    const dateQ = parseDateQuery(q);
     return reservations.filter((r) => {
       if (channelFilter && r.channel !== channelFilter) return false;
       if (!q) return true;
+      if (dateQ) {
+        // The date is during the stay, or matches checkin/checkout exactly.
+        if (r.checkin_date === dateQ || r.checkout_date === dateQ) return true;
+        if (
+          r.checkin_date &&
+          r.checkout_date &&
+          dateQ >= r.checkin_date &&
+          dateQ <= r.checkout_date
+        )
+          return true;
+        return false;
+      }
       if (isAmountQuery) {
         const targets = [r.net_amount, r.gross_amount].filter(
           (n): n is number => n != null,
@@ -107,7 +137,9 @@ export default function Labeling() {
         if (targets.some((n) => Math.abs(n - qAmount) < 0.5)) return true;
         // Also keep substring search so typing "488" matches "1488.82" etc.
       }
-      const blob = `${r.guest_name || ''} ${r.reservation_id || ''} ${r.channel || ''} ${r.net_amount ?? ''} ${r.gross_amount ?? ''}`.toLowerCase();
+      // Substring blob includes ISO and Spanish-formatted dates so partials
+      // like "15/12" or "/12/2025" also work.
+      const blob = `${r.guest_name || ''} ${r.reservation_id || ''} ${r.channel || ''} ${r.net_amount ?? ''} ${r.gross_amount ?? ''} ${r.checkin_date || ''} ${r.checkout_date || ''} ${isoToES(r.checkin_date)} ${isoToES(r.checkout_date)}`.toLowerCase();
       return blob.includes(qLower);
     });
   }, [reservations, resQuery, channelFilter]);
@@ -366,7 +398,7 @@ export default function Labeling() {
               <input
                 value={resQuery}
                 onChange={(e) => setResQuery(e.target.value)}
-                placeholder="Buscar (nombre, ID, importe…)"
+                placeholder="Buscar (nombre, ID, importe, 15/12/2025…)"
                 className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-md text-sm"
               />
             </div>
@@ -378,6 +410,13 @@ export default function Labeling() {
                   title="Filtra reservas cuyo neto coincide con el pago bancario"
                 >
                   ≈ {Math.abs(activeTx.amount).toFixed(2)} €
+                </button>
+                <button
+                  onClick={() => setResQuery(activeTx.transaction_date)}
+                  className="px-2 py-0.5 rounded text-xs bg-violet-100 text-violet-800 hover:bg-violet-200"
+                  title="Reservas cuya estancia incluye la fecha del pago"
+                >
+                  📅 {activeTx.transaction_date}
                 </button>
                 {resQuery && (
                   <button
