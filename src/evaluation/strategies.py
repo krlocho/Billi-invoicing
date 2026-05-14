@@ -15,7 +15,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date, datetime
 from itertools import combinations
+
+
+def _to_date(v) -> date | None:
+    if v is None:
+        return None
+    if isinstance(v, date):
+        return v
+    try:
+        return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 from sqlalchemy.orm import Session
 
@@ -51,12 +63,20 @@ def algorithmic_only(
     transactions: list[TransactionData],
     reservations: list[ReservationData],
     commission_lookup: dict[str, dict] | None = None,
-    max_group_size: int = 4,
+    max_group_size: int = 3,
     amount_tolerance: float = 0.05,
+    date_window_days: int = 60,
 ) -> list[MatchPrediction]:
     """Pure algorithmic matching: enumerate small subsets per channel and
     pick the one whose expected net (after learned commission) best matches
-    the bank amount. No LLM."""
+    the bank amount. No LLM.
+
+    Pruning to keep this tractable on real inventories (~200+ reservations):
+      - candidates restricted to reservations whose checkout is within
+        `date_window_days` of the transaction date
+      - individual gross amount bounded by ~110% of the bank amount
+      - small `max_group_size` (3 covers ~90% of real cases)
+    """
     commission_lookup = commission_lookup or {}
     out: list[MatchPrediction] = []
     used: set[str] = set()
@@ -79,12 +99,34 @@ def algorithmic_only(
             candidates = [r for r in reservations if r.id not in used]
 
         bank_amount = abs(tx.amount)
+
+        # Prune: drop reservations whose individual gross is bigger than the
+        # bank amount + a small slack — they cannot fit in any valid combo.
+        gross_cap = bank_amount * 1.10
+        candidates = [
+            r for r in candidates if (r.gross_amount or 0) > 0 and (r.gross_amount or 0) <= gross_cap
+        ]
+
+        # Prune: drop reservations whose checkout is far from the tx date.
+        tx_date = _to_date(tx.date)
+        if tx_date is not None:
+            def _close(r: ReservationData) -> bool:
+                d = _to_date(r.checkout_date) or _to_date(r.checkin_date)
+                if d is None:
+                    return True  # keep undated to avoid silent FN
+                return abs((d - tx_date).days) <= date_window_days
+
+            candidates = [r for r in candidates if _close(r)]
+
         best: tuple[float, list[ReservationData]] | None = None
 
         for k in range(1, min(max_group_size, len(candidates)) + 1):
             for combo in combinations(candidates, k):
                 grosses = [r.gross_amount or 0 for r in combo]
                 if not all(grosses):
+                    continue
+                # Gross sum must be at least the bank amount (channel keeps a fee).
+                if sum(grosses) < bank_amount * 0.95:
                     continue
                 expected = calculate_expected_net_for_group(grosses, ch, tenant_config)
                 ok, diff = amount_matches(bank_amount, expected, amount_tolerance)
@@ -120,6 +162,7 @@ def llm_only(
     transactions: list[TransactionData],
     reservations: list[ReservationData],
     tenant_context: str = "",
+    examples_block: str = "",
 ) -> list[MatchPrediction]:
     """Call the LLM and trust its predictions verbatim — no algorithmic
     validation, no name/amount cross-check.
@@ -135,6 +178,7 @@ def llm_only(
         rag_context="No previous reconciliation examples available.",
         tenant_context=tenant_context,
         model_tier="fast",
+        examples_block=examples_block,
     )
 
     tx_by_prefix = {t.id[:8]: t.id for t in transactions}
@@ -165,12 +209,14 @@ def hybrid(
     reservations: list[ReservationData],
     tenant_context: str = "",
     commission_lookup: dict[str, dict] | None = None,
+    examples_block: str = "",
 ) -> list[MatchPrediction]:
     matches = run_matching(
         transactions, reservations,
         feedback_examples=None,
         tenant_context=tenant_context,
         commission_lookup=commission_lookup,
+        examples_block=examples_block,
     )
     return [
         MatchPrediction(

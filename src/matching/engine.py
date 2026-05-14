@@ -70,15 +70,16 @@ Rules:
 2. Payment = sum(reservation_amounts) - channel_commission
 3. Names may differ between bank and reservation
 4. Channels pay 1-15 days after checkout
+5. In `res_ids`, return the internal 8-char id from the provided list — NOT the channel's reservation code.
 
 {tenant_context}
 
-Respond ONLY with valid JSON:
-{{"matches":[{{"tx_id":"...","res_ids":["..."],"confidence":0.92,"reasoning":"...","channel":"booking","commission_rate":0.22}}],"unmatched_tx":["..."],"unmatched_res":["..."]}}"""
+Respond ONLY with valid JSON. The `reasoning` field must be ≤ 12 words, no math, no self-correction:
+{{"matches":[{{"tx_id":"...","res_ids":["..."],"confidence":0.92,"reasoning":"<12 words>","channel":"booking","commission_rate":0.22}}],"unmatched_tx":["..."],"unmatched_res":["..."]}}"""
 
 # Compact data format — ~40% fewer tokens than JSON
 DATA_TEMPLATE = """{rag_context}
-
+{examples_block}
 ## Bank transactions to reconcile:
 {transactions_compact}
 
@@ -92,11 +93,14 @@ def run_matching(
     feedback_examples: list[dict] | None = None,
     tenant_context: str = "",
     commission_lookup: dict[str, dict] | None = None,
+    examples_block: str = "",
 ) -> list[MatchResult]:
     """Run LLM-first matching with RAG augmentation and tiered models.
 
     `commission_lookup` maps channel_code -> {rate, sample_size, is_learned, psf_rate}
     and is used by the algorithmic validator instead of hardcoded rates.
+    `examples_block` is a pre-formatted few-shot examples block injected
+    into the LLM prompt — see src.matching.feedback_examples.
     """
     if not transactions or not reservations:
         return []
@@ -113,6 +117,7 @@ def run_matching(
     llm_matches = _llm_match(
         transactions, reservations, detected_channels,
         rag_context, tenant_context, model_tier="fast",
+        examples_block=examples_block,
     )
 
     # Step 4: Algorithmic validation
@@ -135,6 +140,7 @@ def run_matching(
                 ambiguous_transactions, reservations,
                 [_detect_channel(t.description) for t in ambiguous_transactions],
                 rag_context, tenant_context, model_tier="smart",
+                examples_block=examples_block,
             )
             for match in retry_matches:
                 result = _validate_match(match, transactions, reservations, commission_lookup)
@@ -201,6 +207,7 @@ def _llm_match(
     rag_context: str,
     tenant_context: str,
     model_tier: str = "fast",
+    examples_block: str = "",
 ) -> list[MatchResult]:
     """Call LLM for matching. Tier controls model selection."""
 
@@ -209,6 +216,7 @@ def _llm_match(
     )
     user_prompt = DATA_TEMPLATE.format(
         rag_context=rag_context,
+        examples_block=examples_block or "",
         transactions_compact=_build_compact_transactions(transactions),
         reservations_compact=_build_compact_reservations(reservations),
     )
@@ -245,6 +253,11 @@ def _call_llm(system: str, prompt: str, model_tier: str = "fast") -> str:
             contents=f"{system}\n\n{prompt}",
             config=genai.types.GenerateContentConfig(
                 response_mime_type="application/json",
+                max_output_tokens=32768,
+                temperature=0.0,
+                # Gemini 2.5 Flash burns output tokens on chain-of-thought
+                # inside the `reasoning` field if we let it. Cap thinking.
+                thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
             ),
         )
         return response.text
@@ -283,19 +296,67 @@ def _call_llm(system: str, prompt: str, model_tier: str = "fast") -> str:
 
 
 def _parse_response(response_text: str) -> list[MatchResult]:
-    """Parse LLM JSON response into MatchResult objects."""
-    try:
-        data = json.loads(response_text)
-    except json.JSONDecodeError:
+    """Parse LLM JSON response into MatchResult objects.
+
+    The response is occasionally truncated (LLM hits its output token cap
+    mid-array). We recover by extracting whatever complete `{...}` match
+    objects exist before the truncation point.
+    """
+    def _try_load(s: str) -> dict | None:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return None
+
+    data = _try_load(response_text)
+    if data is None:
         start = response_text.find("{")
         end = response_text.rfind("}") + 1
         if start >= 0 and end > start:
-            try:
-                data = json.loads(response_text[start:end])
-            except json.JSONDecodeError:
-                return []
-        else:
+            data = _try_load(response_text[start:end])
+    if data is None:
+        # Tolerant recovery: pull individual match objects from the buffer
+        # by scanning for balanced `{...}` blocks that contain "tx_id".
+        recovered: list[dict] = []
+        i = response_text.find('"matches"')
+        if i < 0:
             return []
+        i = response_text.find("[", i)
+        if i < 0:
+            return []
+        depth = 0
+        start_obj = -1
+        in_str = False
+        esc = False
+        for j in range(i + 1, len(response_text)):
+            c = response_text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+                continue
+            if c == "{":
+                if depth == 0:
+                    start_obj = j
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0 and start_obj >= 0:
+                    obj = _try_load(response_text[start_obj : j + 1])
+                    if isinstance(obj, dict):
+                        recovered.append(obj)
+                    start_obj = -1
+            elif c == "]" and depth == 0:
+                break
+        if not recovered:
+            return []
+        data = {"matches": recovered}
 
     matches = []
     for m in data.get("matches", []):
@@ -367,18 +428,91 @@ def _validate_match(
     match.amount_difference = round(amount_diff, 2)
     scores["amount"] = 1.0 if amount_ok else max(0, 1 - (amount_diff / max(abs(tx.amount), 1)))
 
-    # 2. Name similarity
+    # 2. Name similarity — only when reservations actually carry names.
+    # Booking payouts have no guest_name (GDPR); defaulting to 0.5 there
+    # unfairly drags HIGH-confidence LLM predictions down to MEDIUM.
     name_scores = []
     for r in matched_res:
         if r.guest_name:
             score = name_similarity(tx.description, r.guest_name)
             name_scores.append(score)
-    scores["name"] = max(name_scores) if name_scores else 0.5
+    has_names = bool(name_scores)
+    scores["name"] = max(name_scores) if name_scores else None
 
-    # 3. Hybrid score: LLM confidence (60%) + algorithmic (40%)
+    # 3. Date coherence — channels typically pay 0-15 days after checkout.
+    # Best (closest) reservation in the group sets the score.
+    def _parse_d(s):
+        if not s:
+            return None
+        try:
+            from datetime import date as _d
+            if isinstance(s, _d):
+                return s
+            from datetime import datetime as _dt
+            return _dt.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    tx_d = _parse_d(tx.date)
+    date_deltas: list[int] = []
+    for r in matched_res:
+        co = _parse_d(r.checkout_date) or _parse_d(r.checkin_date)
+        if tx_d and co:
+            date_deltas.append((tx_d - co).days)
+    if date_deltas:
+        # Best (smallest non-negative) gap in the group decides.
+        best = min((d for d in date_deltas if d >= 0), default=min(date_deltas))
+        if 0 <= best <= 15:
+            scores["date"] = 1.0
+        elif 0 <= best <= 30:
+            scores["date"] = 0.7
+        elif -3 <= best < 0:  # tx posted same week as checkout
+            scores["date"] = 0.5
+        else:
+            scores["date"] = max(0.0, 1.0 - abs(best) / 60.0)
+        has_dates = True
+    else:
+        scores["date"] = None
+        has_dates = False
+
+    # 4. Channel coherence — every reservation must belong to the same
+    # channel the bank description indicates.
+    detected = _detect_channel(tx.description)
+    if detected and matched_res:
+        ch_codes = [(r.channel_code or "").lower() for r in matched_res]
+        if all(c == detected for c in ch_codes):
+            scores["channel"] = 1.0
+        elif any(c == detected for c in ch_codes):
+            scores["channel"] = 0.5
+        else:
+            scores["channel"] = 0.0
+        has_channel = True
+    else:
+        scores["channel"] = None
+        has_channel = False
+
+    # 5. Hybrid score — combine whichever components are available.
+    # When the name signal is missing (Booking GDPR-stripped payouts), the
+    # validator falls back to amount + date + channel rather than the old
+    # `name=0.5` default that artificially drove HIGH matches to MEDIUM.
     llm_conf = match.details.get("llm_confidence", match.confidence_score)
-    algo_conf = scores["amount"] * 0.7 + scores["name"] * 0.3
-    final_score = llm_conf * 0.6 + algo_conf * 0.4
+    components: list[tuple[float, float]] = []  # (value, weight)
+    components.append((scores["amount"], 0.5))
+    if has_names:
+        components.append((scores["name"], 0.2))
+    if has_dates:
+        components.append((scores["date"], 0.2 if has_names else 0.3))
+    if has_channel:
+        components.append((scores["channel"], 0.1 if has_names else 0.2))
+    total_w = sum(w for _, w in components)
+    algo_conf = sum(v * w for v, w in components) / total_w if total_w else 0.0
+
+    # Strong-LLM passthrough: high confidence + amount within tolerance
+    # → keep the LLM's score (no dilution).
+    if llm_conf >= 0.85 and amount_ok:
+        final_score = llm_conf
+    else:
+        final_score = llm_conf * 0.6 + algo_conf * 0.4
 
     match.confidence_score = round(final_score, 4)
     match.confidence_tier = (
@@ -387,6 +521,12 @@ def _validate_match(
         else "LOW"
     )
     match.match_type = "hybrid"
-    match.details["scores"] = scores
+    match.details["scores"] = {
+        **scores,
+        "amount_ok": amount_ok,
+        "has_names": has_names,
+        "has_dates": has_dates,
+        "has_channel": has_channel,
+    }
 
     return match

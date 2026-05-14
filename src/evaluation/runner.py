@@ -19,9 +19,11 @@ import sys
 from dataclasses import asdict
 
 from src.database import SessionLocal
+from src.evaluation.cv import run_cv
 from src.evaluation.dataset import build_dataset
 from src.evaluation.metrics import evaluate, format_table
 from src.evaluation.strategies import algorithmic_only, hybrid, hybrid_from_db, llm_only
+from src.matching.feedback_examples import build_examples_block
 from src.matching.learned_commission import learned_rate_lookup
 from src.tasks.reconciliation_tasks import _build_tenant_context
 
@@ -52,6 +54,18 @@ def main(argv: list[str]) -> int:
         help="ground truth source: 'system' = confirmed matches (biased), 'manual' = independent labels",
     )
     parser.add_argument("--output", default=None, help="optional path to write JSON results")
+    parser.add_argument(
+        "--few-shot",
+        type=int,
+        default=8,
+        help="number of confirmed-label examples to include in the LLM prompt (0 to disable)",
+    )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=0,
+        help="if > 0, run k-fold cross-validation so few-shot never sees the test-fold labels (only llm_only / hybrid)",
+    )
     args = parser.parse_args(argv)
 
     requested = [s.strip() for s in args.strategies.split(",") if s.strip()]
@@ -76,15 +90,35 @@ def main(argv: list[str]) -> int:
             tag = "learned" if info.get("is_learned") else "default"
             log.info(f"  {ch}: {info['rate']*100:.2f}%  ({tag}, n={info.get('sample_size', 0)})")
 
+        examples_block = ""
+        if args.few_shot > 0:
+            examples_block = build_examples_block(db, ds.tenant_id, k=args.few_shot)
+            n_examples = examples_block.count("\n- ") if examples_block else 0
+            log.info(f"\nFew-shot examples loaded: {n_examples}")
+
         results = []
         for name in requested:
             log.info(f"\n>> running {name} — {STRATEGIES[name]}")
+            # CV path: only meaningful for LLM-based strategies that consume few-shot
+            if args.cv_folds > 0 and name in ("llm_only", "hybrid"):
+                metrics = run_cv(
+                    name, ds, db, tenant_context, commission_lookup,
+                    k_folds=args.cv_folds, few_shot_k=args.few_shot,
+                )
+                results.append(metrics)
+                continue
             if name == "algorithmic_only":
                 preds = algorithmic_only(ds.transactions, ds.reservations, commission_lookup)
             elif name == "llm_only":
-                preds = llm_only(ds.transactions, ds.reservations, tenant_context)
+                preds = llm_only(
+                    ds.transactions, ds.reservations, tenant_context,
+                    examples_block=examples_block,
+                )
             elif name == "hybrid":
-                preds = hybrid(ds.transactions, ds.reservations, tenant_context, commission_lookup)
+                preds = hybrid(
+                    ds.transactions, ds.reservations, tenant_context, commission_lookup,
+                    examples_block=examples_block,
+                )
             elif name == "hybrid_from_db":
                 preds = hybrid_from_db(db, ds.reconciliation_id)
             else:
