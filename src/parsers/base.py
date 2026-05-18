@@ -15,6 +15,10 @@ class ParsedReservation:
     net_amount: float | None = None
     currency: str = "EUR"
     status: str | None = None
+    # Channel payout batch identifier (e.g. Booking Statement Descriptor)
+    # that lets us match this reservation deterministically to a bank
+    # line when the bank description contains the same reference.
+    payout_ref: str | None = None
     extra_data: dict | None = None
 
 

@@ -189,6 +189,7 @@ def _do_process_channel_file(upload_id: str, celery_task=None):
                 net_amount=r.net_amount,
                 currency=r.currency,
                 status=r.status,
+                payout_ref=r.payout_ref,
                 extra_data=r.extra_data,
             )
             db.add(reservation)

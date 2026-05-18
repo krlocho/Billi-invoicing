@@ -22,7 +22,13 @@ from src.database import SessionLocal
 from src.evaluation.cv import run_cv
 from src.evaluation.dataset import build_dataset
 from src.evaluation.metrics import evaluate, format_table
-from src.evaluation.strategies import algorithmic_only, hybrid, hybrid_from_db, llm_only
+from src.evaluation.strategies import (
+    algorithmic_only,
+    deterministic_only,
+    hybrid,
+    hybrid_from_db,
+    llm_only,
+)
 from src.matching.feedback_examples import build_examples_block
 from src.matching.learned_commission import learned_rate_lookup
 from src.tasks.reconciliation_tasks import _build_tenant_context
@@ -33,6 +39,7 @@ log = logging.getLogger("eval")
 
 STRATEGIES = {
     "algorithmic_only": "no LLM — subset-sum + learned commission + fuzzy names",
+    "deterministic_only": "Booking payout_ref lookup only (no LLM, no algorithm)",
     "llm_only": "LLM proposes matches, no algorithmic validator",
     "hybrid": "current production pipeline (LLM + validator) — re-runs LLM",
     "hybrid_from_db": "matches already produced by production pipeline (no API cost)",
@@ -109,6 +116,8 @@ def main(argv: list[str]) -> int:
                 continue
             if name == "algorithmic_only":
                 preds = algorithmic_only(ds.transactions, ds.reservations, commission_lookup)
+            elif name == "deterministic_only":
+                preds = deterministic_only(ds.transactions, ds.reservations)
             elif name == "llm_only":
                 preds = llm_only(
                     ds.transactions, ds.reservations, tenant_context,

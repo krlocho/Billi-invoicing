@@ -41,6 +41,7 @@ from src.matching.engine import (
     TransactionData,
     _detect_channel,
     _llm_match,
+    _match_by_payout_ref,
     run_matching,
 )
 from src.matching.fuzzy_names import name_similarity
@@ -154,6 +155,28 @@ def algorithmic_only(
             ))
 
     return out
+
+
+# -- deterministic-only (Booking payout_ref lookup) ---------------------------
+
+def deterministic_only(
+    transactions: list[TransactionData],
+    reservations: list[ReservationData],
+) -> list[MatchPrediction]:
+    """Pure structural match: bank `Concepto No.<ref>` → reservations with
+    matching `payout_ref`. Booking exposes this linkage in its payout CSV.
+    Only emits matches where the reference exists — silently skips other txs.
+    """
+    raw = _match_by_payout_ref(transactions, reservations)
+    return [
+        MatchPrediction(
+            bank_transaction_id=m.bank_transaction_id,
+            reservation_ids=frozenset(m.reservation_ids),
+            score=float(m.confidence_score),
+            strategy="deterministic_only",
+        )
+        for m in raw
+    ]
 
 
 # -- LLM-only -----------------------------------------------------------------

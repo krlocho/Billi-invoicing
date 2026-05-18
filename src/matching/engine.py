@@ -13,6 +13,7 @@ passed as context, never hardcoded in prompts.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from src.config import settings
@@ -48,6 +49,7 @@ class ReservationData:
     gross_amount: float | None
     net_amount: float | None
     channel_code: str | None
+    payout_ref: str | None = None
 
 
 @dataclass
@@ -107,15 +109,29 @@ def run_matching(
 
     commission_lookup = commission_lookup or {}
 
+    # Step 0: Deterministic lookups by payout reference (Booking's
+    # `Concepto No.XXX` ↔ Statement Descriptor). Whatever resolves here
+    # is removed from the LLM workload.
+    deterministic = _match_by_payout_ref(transactions, reservations)
+    resolved_tx_ids = {m.bank_transaction_id for m in deterministic}
+    remaining = [t for t in transactions if t.id not in resolved_tx_ids]
+    if deterministic:
+        logger.info(
+            f"Deterministic payout_ref matched {len(deterministic)} "
+            f"bank transactions before LLM stage"
+        )
+    if not remaining:
+        return deterministic
+
     # Step 1: Detect channels from bank descriptions
-    detected_channels = [_detect_channel(tx.description) for tx in transactions]
+    detected_channels = [_detect_channel(tx.description) for tx in remaining]
 
     # Step 2: Retrieve RAG context (similar past reconciliations)
-    rag_context = _get_rag_context(transactions, detected_channels)
+    rag_context = _get_rag_context(remaining, detected_channels)
 
     # Step 3: LLM matching with Haiku (fast/cheap)
     llm_matches = _llm_match(
-        transactions, reservations, detected_channels,
+        remaining, reservations, detected_channels,
         rag_context, tenant_context, model_tier="fast",
         examples_block=examples_block,
     )
@@ -147,7 +163,68 @@ def run_matching(
                 result.match_type = "hybrid_escalated"
                 validated.append(result)
 
-    return validated
+    return deterministic + validated
+
+
+# Bank "Concepto No.<ref>" identifier — captures the 16-char payout
+# reference (always lowercased by Spanish bank statements). The optional
+# `/id.<property>` suffix is informational and we don't depend on it.
+_CONCEPTO_RE = re.compile(r"concepto\s+no\.?\s*([a-z0-9]{8,})", re.IGNORECASE)
+
+
+def _extract_payout_ref(description: str) -> str | None:
+    """Pull the payout reference out of a bank statement line."""
+    if not description:
+        return None
+    m = _CONCEPTO_RE.search(description)
+    return m.group(1).lower() if m else None
+
+
+def _match_by_payout_ref(
+    transactions: list[TransactionData],
+    reservations: list[ReservationData],
+) -> list[MatchResult]:
+    """Deterministic Booking match: bank `Concepto No.<ref>` → reservations
+    sharing the same `payout_ref`. No LLM, no subset-sum — Booking ships
+    the exact `(payout, reservations)` linkage in their payout CSV."""
+    out: list[MatchResult] = []
+    # Index reservations by lowercased payout_ref
+    by_ref: dict[str, list[ReservationData]] = {}
+    for r in reservations:
+        if r.payout_ref:
+            by_ref.setdefault(r.payout_ref.lower(), []).append(r)
+    if not by_ref:
+        return out
+    for tx in transactions:
+        ref = _extract_payout_ref(tx.description)
+        if not ref:
+            continue
+        group = by_ref.get(ref)
+        if not group:
+            continue
+        # Sanity: their reported net should sum close to the bank amount.
+        # We still emit the match if it doesn't perfectly tie — the
+        # mismatch is itself useful signal — but flag it in details.
+        net_sum = sum((r.net_amount or 0) for r in group)
+        amount = abs(tx.amount)
+        amount_diff = round(amount - net_sum, 2)
+        out.append(MatchResult(
+            bank_transaction_id=tx.id,
+            reservation_ids=[r.id for r in group],
+            confidence_score=1.0,
+            confidence_tier="HIGH",
+            amount_difference=amount_diff,
+            match_type="deterministic_payout_ref",
+            reasoning=f"Bank Concepto No.{ref} matches payout containing {len(group)} reservations",
+            details={
+                "payout_ref": ref,
+                "channel": "booking",
+                "net_sum": round(net_sum, 2),
+                "bank_amount": amount,
+                "amount_diff": amount_diff,
+            },
+        ))
+    return out
 
 
 def _detect_channel(description: str) -> str | None:
@@ -428,14 +505,20 @@ def _validate_match(
     match.amount_difference = round(amount_diff, 2)
     scores["amount"] = 1.0 if amount_ok else max(0, 1 - (amount_diff / max(abs(tx.amount), 1)))
 
-    # 2. Name similarity — only when reservations actually carry names.
-    # Booking payouts have no guest_name (GDPR); defaulting to 0.5 there
-    # unfairly drags HIGH-confidence LLM predictions down to MEDIUM.
-    name_scores = []
-    for r in matched_res:
-        if r.guest_name:
-            score = name_similarity(tx.description, r.guest_name)
-            name_scores.append(score)
+    # 2. Name similarity — applies only when the bank text could plausibly
+    # carry an individual guest name. Channel payouts (Booking, Airbnb,
+    # Stripe, Expedia) put the *channel's* corporate name in the bank
+    # description, not the guest's — comparing those is noise that drags
+    # genuine matches down. Same for grouped payouts (one bank line
+    # covers many guests).
+    detected_for_name = _detect_channel(tx.description)
+    is_channel_payout = detected_for_name is not None
+    is_grouped = len(matched_res) > 1
+    name_scores: list[float] = []
+    if not is_channel_payout and not is_grouped:
+        for r in matched_res:
+            if r.guest_name:
+                name_scores.append(name_similarity(tx.description, r.guest_name))
     has_names = bool(name_scores)
     scores["name"] = max(name_scores) if name_scores else None
 

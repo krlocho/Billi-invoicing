@@ -27,6 +27,11 @@ class ChannelReservation(Base):
     net_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(3), default="EUR")
     status: Mapped[str | None] = mapped_column(String(20))  # confirmed, cancelled, no-show
+    # Channel's payout-batch identifier (Booking "Statement Descriptor",
+    # Airbnb "Reference code", etc.). When this matches the reference
+    # present in the bank description, the match is deterministic and
+    # the LLM/subset-sum can be skipped entirely.
+    payout_ref: Mapped[str | None] = mapped_column(String(64), index=True)
     extra_data: Mapped[dict | None] = mapped_column(JSONB)
     is_reconciled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -84,6 +84,7 @@ def _do_reconciliation(reconciliation_id: str, bank_upload_id: str, channel_uplo
                 gross_amount=float(r.gross_amount) if r.gross_amount else None,
                 net_amount=float(r.net_amount) if r.net_amount else None,
                 channel_code=_get_channel_code(db, r.channel_id),
+                payout_ref=r.payout_ref,
             )
             for r in reservations
         ]
