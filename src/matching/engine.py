@@ -184,17 +184,35 @@ def _match_by_payout_ref(
     transactions: list[TransactionData],
     reservations: list[ReservationData],
 ) -> list[MatchResult]:
-    """Deterministic Booking match: bank `Concepto No.<ref>` → reservations
-    sharing the same `payout_ref`. No LLM, no subset-sum — Booking ships
-    the exact `(payout, reservations)` linkage in their payout CSV."""
+    """Deterministic match using channel-provided payout linkage.
+
+    Two paths, depending on whether the bank exposes the payout reference
+    in its description (Booking does, Airbnb / Stripe / Expedia do not):
+
+      A. Reference present in bank text (Booking): regex out
+         `Concepto No.<ref>` → reservations with same `payout_ref` →
+         emit match. O(1) lookup, zero ambiguity.
+
+      B. Reference absent in bank text but stable on the channel side
+         (Airbnb): group reservations by their `payout_ref` to recover
+         the original payout. For each Airbnb bank line, find the group
+         whose net-sum equals the bank amount within tolerance and whose
+         dates are within a ±7-day window of the bank date. If exactly
+         one group satisfies both constraints, the match is unambiguous.
+
+    Booking pre-November rows in the DB don't yet carry payout_ref →
+    they silently fall through to the LLM stage. Same for Stripe groups
+    once we wire up that side.
+    """
     out: list[MatchResult] = []
-    # Index reservations by lowercased payout_ref
+    used_reservation_ids: set[str] = set()
+
+    # Path A — bank carries the ref
     by_ref: dict[str, list[ReservationData]] = {}
     for r in reservations:
         if r.payout_ref:
             by_ref.setdefault(r.payout_ref.lower(), []).append(r)
-    if not by_ref:
-        return out
+
     for tx in transactions:
         ref = _extract_payout_ref(tx.description)
         if not ref:
@@ -202,9 +220,6 @@ def _match_by_payout_ref(
         group = by_ref.get(ref)
         if not group:
             continue
-        # Sanity: their reported net should sum close to the bank amount.
-        # We still emit the match if it doesn't perfectly tie — the
-        # mismatch is itself useful signal — but flag it in details.
         net_sum = sum((r.net_amount or 0) for r in group)
         amount = abs(tx.amount)
         amount_diff = round(amount - net_sum, 2)
@@ -224,6 +239,98 @@ def _match_by_payout_ref(
                 "amount_diff": amount_diff,
             },
         ))
+        for r in group:
+            used_reservation_ids.add(r.id)
+
+    matched_tx_ids = {m.bank_transaction_id for m in out}
+
+    # Path B — bank text is identical for every transfer, but the
+    # channel-side payout grouping is structural. We rebuild the implicit
+    # "payout summary" by grouping reservations by their payout_ref and
+    # matching `sum(net) ≈ bank_amount` within a date window.
+    from datetime import date as _date, datetime as _dt, timedelta
+
+    def _parse(s):
+        if not s:
+            return None
+        if isinstance(s, _date):
+            return s
+        try:
+            return _dt.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    AMOUNT_TOL = 0.05  # EUR
+    DATE_WINDOW = timedelta(days=7)
+
+    # Build per-channel groups keyed by payout_ref. Filter out groups
+    # whose reservations are already used by Path A.
+    channel_groups: dict[str, dict[str, list[ReservationData]]] = {}
+    for r in reservations:
+        if not r.payout_ref or r.id in used_reservation_ids:
+            continue
+        ch = (r.channel_code or "").lower() or "unknown"
+        if ch == "booking":
+            continue  # Booking is handled exclusively by Path A
+        channel_groups.setdefault(ch, {}).setdefault(r.payout_ref, []).append(r)
+
+    for tx in transactions:
+        if tx.id in matched_tx_ids:
+            continue
+        ch = (_detect_channel(tx.description) or "").lower()
+        if not ch:
+            continue
+        ch_buckets = channel_groups.get(ch)
+        if not ch_buckets:
+            continue
+        amount = abs(tx.amount)
+        tx_date = _parse(tx.date)
+        candidates: list[tuple[str, list[ReservationData], float]] = []
+        for ref, group in ch_buckets.items():
+            net_sum = sum((r.net_amount or 0) for r in group)
+            if abs(net_sum - amount) > AMOUNT_TOL:
+                continue
+            # Date sanity: at least one reservation's checkout/checkin
+            # within ±7 days of the bank date (the bank receives 0-3
+            # days after Airbnb's payout date).
+            if tx_date:
+                dates = [
+                    _parse(r.checkout_date) or _parse(r.checkin_date)
+                    for r in group
+                ]
+                dates = [d for d in dates if d]
+                if not dates:
+                    continue
+                if not any(abs(tx_date - d) <= DATE_WINDOW for d in dates):
+                    continue
+            candidates.append((ref, group, net_sum))
+
+        if len(candidates) != 1:
+            # 0 → no structural match (let LLM try)
+            # >1 → ambiguous (also defer to LLM — rare but possible)
+            continue
+        ref, group, net_sum = candidates[0]
+        # Skip if any reservation in this group has already been used by Path A.
+        if any(r.id in used_reservation_ids for r in group):
+            continue
+        out.append(MatchResult(
+            bank_transaction_id=tx.id,
+            reservation_ids=[r.id for r in group],
+            confidence_score=1.0,
+            confidence_tier="HIGH",
+            amount_difference=round(amount - net_sum, 2),
+            match_type="deterministic_amount_date",
+            reasoning=f"{ch} payout {ref} sum={net_sum:.2f} matches bank {amount:.2f}",
+            details={
+                "payout_ref": ref,
+                "channel": ch,
+                "net_sum": round(net_sum, 2),
+                "bank_amount": amount,
+                "group_size": len(group),
+            },
+        ))
+        for r in group:
+            used_reservation_ids.add(r.id)
     return out
 
 

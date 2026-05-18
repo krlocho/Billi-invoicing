@@ -91,12 +91,31 @@ class AirbnbParser(ChannelParser):
             return col_map.get(name.lower())
 
         type_col = col("type")
+        ref_col = col("reference code")
         reservations: list[ParsedReservation] = []
+
+        # Airbnb CSVs interleave Payout rows with their child Reservation rows
+        # (Payout first, then the reservations it disbursed). The Payout row
+        # carries the "Reference code" (G-…) that links siblings together.
+        # We keep that ref as state and stamp it onto each subsequent
+        # Reservation row until the next Payout row.
+        current_payout_ref: str | None = None
 
         for _, row in df.iterrows():
             row_type = str(row.get(type_col, "")).strip().lower() if type_col else ""
-            # Only true reservation rows. Payouts, adjustments, host fees, etc. are not.
+
+            if row_type == "payout":
+                ref = row.get(ref_col) if ref_col else None
+                if ref is not None and pd.notna(ref):
+                    s = str(ref).strip()
+                    current_payout_ref = s or None
+                else:
+                    current_payout_ref = None
+                continue
+
             if row_type and row_type != "reservation":
+                # Resolution adjustments, host fees, etc. — ignore but keep the
+                # current payout context in case the next row is a reservation.
                 continue
 
             confirmation = row.get(col("confirmation code")) if col("confirmation code") else None
@@ -132,6 +151,7 @@ class AirbnbParser(ChannelParser):
                 net_amount=net,
                 currency=currency,
                 status="confirmed",
+                payout_ref=current_payout_ref,
                 extra_data=None,
             ))
 
