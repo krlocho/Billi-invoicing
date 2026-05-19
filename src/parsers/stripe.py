@@ -117,6 +117,16 @@ class StripeParser(ChannelParser):
             if statement and pd.notna(statement):
                 room_type = f"Pago tarjeta · {str(statement).strip()}"
 
+            # `Transfer` is the Stripe payout id (po_…) that groups
+            # several charges into a single bank transfer. Treat it as
+            # payout_ref so the deterministic stage can match this
+            # charge against its Stripe-side bank line.
+            transfer = row.get(col("transfer")) if col("transfer") else None
+            payout_ref = None
+            if transfer and pd.notna(transfer):
+                t = str(transfer).strip()
+                payout_ref = t or None
+
             reservations.append(ParsedReservation(
                 reservation_id=str(charge_id).strip(),
                 guest_name=guest,
@@ -129,6 +139,7 @@ class StripeParser(ChannelParser):
                 net_amount=net,
                 currency=currency,
                 status=str(status_val).strip().lower() if status_val and pd.notna(status_val) else None,
+                payout_ref=payout_ref,
                 extra_data=None,
             ))
 
